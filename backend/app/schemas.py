@@ -1,4 +1,16 @@
+"""
+schemas.py
+──────────
+Purpose:
+    Defines the core Pydantic models for request validation and response serialization 
+    for the primary API routes (Ingestion, Proposals, Audit, Quarantine, Sources).
+
+Usage:
+    - Facilitates standard type-checking and structural verification for HTTP data exchange.
+"""
+
 from pydantic import BaseModel
+
 from typing import List, Optional, Any, Dict
 from datetime import datetime
 
@@ -44,6 +56,7 @@ class ProposalResponse(BaseModel):
     description_md: Optional[str] = None
     suggested_skills_to_add: Optional[List[dict]] = None
     enrichment_applied: Optional[List[str]] = None
+    extra_params: Optional[dict] = None
 
 
 class ApproveRequest(BaseModel):

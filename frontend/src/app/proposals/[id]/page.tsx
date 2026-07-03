@@ -38,6 +38,7 @@ export default function ProposalDetailPage() {
   const [context, setContext] = useState<ProposalContextResponse | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
+  const [contextErrorStatus, setContextErrorStatus] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("drift");
 
@@ -74,9 +75,14 @@ export default function ProposalDetailPage() {
     if (tab !== "context" || !id || context) return;
     setContextLoading(true);
     setContextError(null);
+    setContextErrorStatus(null);
     getProposalContext(id)
       .then(setContext)
-      .catch((e) => setContextError(String(e.message ?? e)))
+      .catch((e) => {
+        const err = e as Error & { status?: number };
+        setContextError(String(err.message ?? err));
+        setContextErrorStatus(err.status ?? null);
+      })
       .finally(() => setContextLoading(false));
   }, [tab, id, context]);
 
@@ -316,6 +322,7 @@ export default function ProposalDetailPage() {
                 context={context}
                 loading={contextLoading}
                 error={contextError}
+                errorStatus={contextErrorStatus}
               />
             )}
           </div>
@@ -487,6 +494,19 @@ export default function ProposalDetailPage() {
                 </div>
               </div>
             )}
+            {proposal.extra_params && Object.keys(proposal.extra_params).length > 0 && (
+              <div className="pt-2.5 border-t border-border-subtle mt-2.5">
+                <div className="text-2xs font-medium uppercase tracking-wider text-fg-muted mb-1.5">Extra Parameters</div>
+                <div className="space-y-1">
+                  {Object.entries(proposal.extra_params).map(([key, val]) => (
+                    <div key={key} className="flex justify-between items-center text-xs">
+                      <span className="font-mono text-fg-muted">{key}</span>
+                      <span className="font-mono bg-bg-subtle px-1.5 py-0.5 rounded text-fg-strong border border-border-subtle">{String(val)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {proposal.suggested_skills_to_add && proposal.suggested_skills_to_add.length > 0 ? (
@@ -641,10 +661,12 @@ function ContextBundleTab({
   context,
   loading,
   error,
+  errorStatus,
 }: {
   context: ProposalContextResponse | null;
   loading: boolean;
   error: string | null;
+  errorStatus: number | null;
 }) {
   if (loading) {
     return (
@@ -657,7 +679,7 @@ function ContextBundleTab({
   }
 
   if (error) {
-    const is404 = error.includes("404");
+    const is404 = errorStatus === 404;
     return (
       <div className="p-4">
         {is404 ? (
@@ -932,3 +954,4 @@ function SuggestedSkillsCard({
     </div>
   );
 }
+

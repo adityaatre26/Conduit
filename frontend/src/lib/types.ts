@@ -44,7 +44,6 @@ export interface ProposalResponse {
   enrichment_applied?: string[] | null;
 }
 
-
 export interface ExecutionResult {
   proposal_id: string;
   rows_written: number;
@@ -75,7 +74,6 @@ export interface InsightSummary {
   insights: InsightItem[];
   generated_at?: string | null;
 }
-
 
 export interface AuditEntry {
   id: number;
@@ -111,6 +109,30 @@ export interface ApproveRequest {
 
 export interface RejectRequest {
   reason: string;
+}
+
+/* ─── Connector types ──────────────────────────────────────── */
+
+export interface ConnectorProvider {
+  type: string;
+  credential_fields: string[];
+}
+
+export interface ConnectorConnection {
+  id: string;
+  type: string;
+  display_name: string;
+  status: "connected" | "disconnected";
+  read_only: boolean;
+  connected_at?: number | null;
+}
+
+export interface RegisterConnectorRequest {
+  conn_id: string;
+  db_type: string;
+  credentials: Record<string, unknown>;
+  read_only?: boolean;
+  display_name?: string;
 }
 
 /* ─── Extension types ──────────────────────────────────────── */
@@ -254,4 +276,3 @@ export interface SuggestTargetResponse {
   incoming_columns: string[];
   suggestions: TableSuggestion[];
 }
-

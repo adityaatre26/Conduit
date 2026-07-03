@@ -1,61 +1,33 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, JSON
-from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy.dialects.postgresql import ARRAY
+"""
+models.py
+─────────
+Purpose:
+    Defines the core SQLAlchemy ORM models representing tables 
+    in the `conduit` schema of the PostgreSQL database.
+
+Models:
+    - `PipelineSkillsLedger`: Logs executions of transformation scripts.
+    - `QuarantineRecord`: Stores raw CSV rows that failed validation and execution rules.
+    - `Proposal`: Stores ingestion proposals, generated code, gateway state, and audit logs.
+    - `InsightRecord`: Stores AI-generated business/data insights for proposals.
+"""
+
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime, JSON
+from sqlalchemy.orm import declarative_base
 from datetime import datetime
 
 Base = declarative_base()
 
-class WarehouseUnit(Base):
-    __tablename__ = "warehouse_units"
-    __table_args__ = {"schema": "conduit"}
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String, unique=True, nullable=False)
-    unit_type = Column(String, nullable=False)
-    connection_secret_id = Column(String, nullable=False)
 
-class SubProject(Base):
-    __tablename__ = "sub_projects"
-    __table_args__ = {"schema": "conduit"}
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    warehouse_id = Column(Integer, ForeignKey("conduit.warehouse_units.id", ondelete="CASCADE"))
-    name = Column(String)
-    description = Column(String)
-    data_role = Column(String, default="PERSISTENT")
-    data_owner = Column(String)
-    business_kpi_impact = Column(String, nullable=True)
-
-class TableMetadata(Base):
-    __tablename__ = "tables_metadata"
-    __table_args__ = {"schema": "conduit"}
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    sub_project_id = Column(Integer, ForeignKey("conduit.sub_projects.id", ondelete="CASCADE"))
-    table_name = Column(String)
-    semantic_description = Column(String)
-    storage_location_uri = Column(String)
-    file_format_type = Column(String)
-    version_number = Column(Integer, default=1)
-    aliases = Column(ARRAY(String), default=list)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_mutated_at = Column(DateTime, default=datetime.utcnow)
-
-class AttributeMetadata(Base):
-    __tablename__ = "attributes_metadata"
-    __table_args__ = {"schema": "conduit"}
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    table_id = Column(Integer, ForeignKey("conduit.tables_metadata.id", ondelete="CASCADE"))
-    column_name = Column(String)
-    data_type = Column(String)
-    semantic_description = Column(String)
-    is_required = Column(Boolean, default=False)
-    is_pii = Column(Boolean, default=False)
-    anomaly_threshold = Column(Float, default=0.05)
-    sample_values = Column(ARRAY(String), default=list)
+# NOTE: WarehouseUnit, SubProject, TableMetadata, AttributeMetadata removed.
+# Connections are now managed by DBConnectionFactory (app/connectors/db_factory.py).
+# Schema metadata lives in the Neo4j knowledge graph (graph_knowledge_service.py).
 
 class PipelineSkillsLedger(Base):
     __tablename__ = "pipeline_skills_ledger"
     __table_args__ = {"schema": "conduit"}
     id = Column(Integer, primary_key=True, autoincrement=True)
-    table_id = Column(Integer, ForeignKey("conduit.tables_metadata.id", ondelete="CASCADE"))
+    table_id = Column(Integer, nullable=True)  # Legacy: was FK to tables_metadata (model removed)
     proposal_id = Column(String, ForeignKey("conduit.proposals.id", ondelete="CASCADE"), nullable=True)
     skill_name = Column(String)
     applied_by_llm_version = Column(String, nullable=True)
@@ -63,6 +35,8 @@ class PipelineSkillsLedger(Base):
     human_approver_id = Column(String)
     execution_status = Column(String)
     executed_at = Column(DateTime, default=datetime.utcnow)
+    graph_node_id = Column(String, nullable=True)
+
 
 class QuarantineRecord(Base):
     __tablename__ = "quarantine_records"
@@ -97,6 +71,8 @@ class Proposal(Base):
     description_md = Column(String, nullable=True)
     suggested_skills_to_add = Column(JSON, nullable=True)
     enrichment_applied = Column(JSON, nullable=True)
+    # Extra user-supplied key-value parameters (source_system, batch_id, env, etc.)
+    extra_params = Column(JSON, nullable=True)
 
 
 class InsightRecord(Base):

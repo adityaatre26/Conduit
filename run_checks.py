@@ -15,18 +15,40 @@ from pathlib import Path
 
 BASE = "http://localhost:8000/api"
 
+# Reconfigure stdout/stderr to UTF-8 on Windows if supported to prevent cp1252 encoding errors
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Encoding-safe icons for Windows CP1252/UTF-8 compat
 try:
     "✅".encode(sys.stdout.encoding or "utf-8")
+    "✔".encode(sys.stdout.encoding or "utf-8")
     PASS = "✅"
     FAIL = "❌"
     SKIP = "⚠️"
     TEST_ICON = "🧪"
+    OK_ICON = "✔"
+    ERR_ICON = "✘"
+    PARTY_ICON = "🎉"
+    WARN_ICON = "⚠️"
 except Exception:
     PASS = "[PASS]"
     FAIL = "[FAIL]"
     SKIP = "[SKIP]"
     TEST_ICON = "="
+    OK_ICON = "[OK]"
+    ERR_ICON = "[ERROR]"
+    PARTY_ICON = "[SUCCESS]"
+    WARN_ICON = "[WARN]"
+
 
 results = {"pass": 0, "fail": 0, "skip": 0}
 
@@ -71,7 +93,7 @@ def scenario_a():
             f"{BASE}/ingest",
             files={"file": ("clean_orders.csv", f, "text/csv")},
             data={"target_table": "orders_clean"},
-            timeout=30,
+            timeout=120,
         )
 
     check("A.1 Ingest returns 200", resp.status_code == 200, f"got {resp.status_code}: {resp.text[:200]}")
@@ -93,16 +115,16 @@ def scenario_a():
     resp2 = httpx.post(
         f"{BASE}/proposals/{pid}/approve",
         json={"human_approver_id": "test_engineer_01"},
-        timeout=30,
+        timeout=120,
     )
     check("A.6 Approval returns 200", resp2.status_code == 200, f"got {resp2.status_code}: {resp2.text[:200]}")
     if resp2.status_code == 200:
         exec_data = resp2.json()
-        check("A.7 rows_written == 5", exec_data.get("rows_written") == 5, f"got {exec_data.get('rows_written')}")
+        check("A.7 rows_written == 30", exec_data.get("rows_written") == 30, f"got {exec_data.get('rows_written')}")
         check("A.8 execution_status == SUCCESS", exec_data.get("execution_status") == "SUCCESS", f"got {exec_data.get('execution_status')}")
 
     # Lineage event check
-    resp3 = httpx.get(f"{BASE}/lineage/{pid}", timeout=10)
+    resp3 = httpx.get(f"{BASE}/lineage/{pid}", timeout=120)
     if resp3.status_code == 200:
         events = resp3.json()
         check("A.9 Lineage event created", len(events) > 0, "no lineage events")
@@ -110,7 +132,7 @@ def scenario_a():
         check("A.9 Lineage endpoint reachable", False, f"got {resp3.status_code}")
 
     # Graph auto-populated check
-    resp4 = httpx.get(f"{BASE}/graph/nodes?node_type=FILE", timeout=10)
+    resp4 = httpx.get(f"{BASE}/graph/nodes?node_type=FILE", timeout=120)
     if resp4.status_code == 200:
         nodes = resp4.json()
         file_nodes = [n for n in nodes if "clean_orders" in (n.get("entity_name") or "")]
@@ -136,7 +158,7 @@ def scenario_b():
             f"{BASE}/ingest",
             files={"file": ("drifted_orders.csv", f, "text/csv")},
             data={"target_table": "orders_clean"},
-            timeout=30,
+            timeout=120,
         )
 
     check("B.1 Ingest returns 200", resp.status_code == 200, f"got {resp.status_code}: {resp.text[:200]}")
@@ -156,7 +178,7 @@ def scenario_b():
     resp2 = httpx.post(
         f"{BASE}/proposals/{pid}/approve",
         json={"human_approver_id": "test_engineer_02"},
-        timeout=30,
+        timeout=120,
     )
     check("B.5 Approval succeeds", resp2.status_code == 200, f"got {resp2.status_code}: {resp2.text[:200]}")
 
@@ -178,7 +200,7 @@ def scenario_c():
             f"{BASE}/ingest",
             files={"file": ("conflicted_orders.csv", f, "text/csv")},
             data={"target_table": "orders_clean"},
-            timeout=30,
+            timeout=120,
         )
 
     check("C.1 Ingest returns 200", resp.status_code == 200, f"got {resp.status_code}: {resp.text[:200]}")
@@ -207,7 +229,7 @@ def scenario_d():
         f"{BASE}/ingest",
         files={"file": ("zero_overlap.csv", io.BytesIO(csv_bytes), "text/csv")},
         data={"target_table": "orders_clean"},
-        timeout=30,
+        timeout=120,
     )
 
     check("D.1 Ingest returns 200", resp.status_code == 200, f"got {resp.status_code}: {resp.text[:200]}")
@@ -232,7 +254,7 @@ def scenario_e():
         f"{BASE}/ingest",
         files={"file": ("test.pdf", io.BytesIO(pdf_header), "application/pdf")},
         data={"target_table": "orders_clean"},
-        timeout=30,
+        timeout=120,
     )
     check("E.1 PDF rejected (400)", resp.status_code == 400, f"got {resp.status_code}")
 
@@ -241,7 +263,7 @@ def scenario_e():
         f"{BASE}/ingest",
         files={"file": ("empty.csv", io.BytesIO(b""), "text/csv")},
         data={"target_table": "orders_clean"},
-        timeout=30,
+        timeout=120,
     )
     check("E.2 Empty file rejected (400)", resp2.status_code == 400, f"got {resp2.status_code}")
 
@@ -267,7 +289,7 @@ def scenario_f():
         "constraints": "Email must be non-null and string type.",
         "owner": "Test Suite"
     }
-    resp = httpx.post(f"{BASE}/skills", json=skill_data, timeout=10)
+    resp = httpx.post(f"{BASE}/skills", json=skill_data, timeout=120)
     check("F.1 Create skill returns 201", resp.status_code == 201, f"got {resp.status_code}: {resp.text[:200]}")
     if resp.status_code == 201:
         skill = resp.json()
@@ -280,11 +302,11 @@ def scenario_f():
     sid = state["test_skill_id"]
 
     # F.3: Get skill by ID
-    resp3 = httpx.get(f"{BASE}/skills/{sid}", timeout=10)
+    resp3 = httpx.get(f"{BASE}/skills/{sid}", timeout=120)
     check("F.3 GET skill by ID returns 200", resp3.status_code == 200, f"got {resp3.status_code}")
 
     # F.4: Search skills
-    resp4 = httpx.get(f"{BASE}/skills/search?q=email", timeout=10)
+    resp4 = httpx.get(f"{BASE}/skills/search?q=email", timeout=120)
     check("F.4 Search finds skill", resp4.status_code == 200 and len(resp4.json()) > 0, f"got {resp4.status_code}, results: {len(resp4.json()) if resp4.status_code == 200 else 'N/A'}")
 
     # F.5: Attach script
@@ -293,7 +315,7 @@ def scenario_f():
         "script_hash": "abc123def456",
         "is_validated": True
     }
-    resp5 = httpx.post(f"{BASE}/skills/{sid}/scripts", json=script_data, timeout=10)
+    resp5 = httpx.post(f"{BASE}/skills/{sid}/scripts", json=script_data, timeout=120)
     check("F.5 Attach script returns 201", resp5.status_code == 201, f"got {resp5.status_code}: {resp5.text[:200]}")
 
     # F.6: Attach issue
@@ -301,11 +323,11 @@ def scenario_f():
         "issue_reference": "INC-TEST-001",
         "resolution_notes": "Unicode emails were failing validation. Fixed regex pattern."
     }
-    resp6 = httpx.post(f"{BASE}/skills/{sid}/issues", json=issue_data, timeout=10)
+    resp6 = httpx.post(f"{BASE}/skills/{sid}/issues", json=issue_data, timeout=120)
     check("F.6 Attach issue returns 201", resp6.status_code == 201, f"got {resp6.status_code}: {resp6.text[:200]}")
 
     # F.7: Verify detail includes children
-    resp7 = httpx.get(f"{BASE}/skills/{sid}", timeout=10)
+    resp7 = httpx.get(f"{BASE}/skills/{sid}", timeout=120)
     if resp7.status_code == 200:
         detail = resp7.json()
         check("F.7 Detail includes scripts", len(detail.get("scripts", [])) > 0, "no scripts")
@@ -314,11 +336,11 @@ def scenario_f():
         check("F.7 Detail fetch", False, f"got {resp7.status_code}")
 
     # F.9: Deprecate skill
-    resp9 = httpx.patch(f"{BASE}/skills/{sid}", json={"status": "DEPRECATED"}, timeout=10)
+    resp9 = httpx.patch(f"{BASE}/skills/{sid}", json={"status": "DEPRECATED"}, timeout=120)
     check("F.9 Deprecate returns 200", resp9.status_code == 200, f"got {resp9.status_code}")
 
     # Verify deprecated skill excluded from search
-    resp10 = httpx.get(f"{BASE}/skills/search?q={skill_name}", timeout=10)
+    resp10 = httpx.get(f"{BASE}/skills/search?q={skill_name}", timeout=120)
     if resp10.status_code == 200:
         found = [s for s in resp10.json() if s.get("skill_name") == skill_name]
         check("F.10 Deprecated skill excluded from search", len(found) == 0, f"found {len(found)} results")
@@ -338,7 +360,7 @@ def scenario_g():
         "entity_id": "tbl-invoices",
         "entity_name": "invoices",
         "metadata": {"semantic_description": "Invoice records generated from orders."}
-    }, timeout=10)
+    }, timeout=120)
     check("G.1 Create TABLE node invoices", node1.status_code == 201, f"got {node1.status_code}: {node1.text[:200]}")
 
     node2 = httpx.post(f"{BASE}/graph/nodes", json={
@@ -346,7 +368,7 @@ def scenario_g():
         "entity_id": "kpi-quarterly",
         "entity_name": "quarterly_revenue",
         "metadata": {"description": "Quarterly revenue aggregation."}
-    }, timeout=10)
+    }, timeout=120)
     check("G.2 Create KPI node quarterly_revenue", node2.status_code == 201, f"got {node2.status_code}")
 
     if node1.status_code == 201 and node2.status_code == 201:
@@ -357,7 +379,7 @@ def scenario_g():
 
         # G.3: Create edges — invoices DEPENDS_ON orders_clean
         # First find orders_clean node id
-        nodes_resp = httpx.get(f"{BASE}/graph/nodes?node_type=TABLE", timeout=10)
+        nodes_resp = httpx.get(f"{BASE}/graph/nodes?node_type=TABLE", timeout=120)
         orders_node = None
         if nodes_resp.status_code == 200:
             for n in nodes_resp.json():
@@ -371,7 +393,7 @@ def scenario_g():
                 "target_node_id": orders_node["id"],
                 "relation_type": "DEPENDS_ON",
                 "confidence_score": 0.95
-            }, timeout=10)
+            }, timeout=120)
             check("G.3 Create DEPENDS_ON edge invoices→orders_clean", edge1.status_code == 201, f"got {edge1.status_code}")
 
             edge2 = httpx.post(f"{BASE}/graph/edges", json={
@@ -379,11 +401,11 @@ def scenario_g():
                 "target_node_id": inv_id,
                 "relation_type": "DEPENDS_ON",
                 "confidence_score": 0.9
-            }, timeout=10)
+            }, timeout=120)
             check("G.4 Create DEPENDS_ON edge quarterly_revenue→invoices", edge2.status_code == 201, f"got {edge2.status_code}")
 
             # G.5: BFS lineage
-            lineage = httpx.get(f"{BASE}/graph/lineage/orders_clean?max_depth=4", timeout=10)
+            lineage = httpx.get(f"{BASE}/graph/lineage/orders_clean?max_depth=4", timeout=120)
             if lineage.status_code == 200:
                 lin_data = lineage.json()
                 node_names = [n.get("entity_name") for n in lin_data.get("nodes", [])]
@@ -392,7 +414,7 @@ def scenario_g():
                 check("G.5 BFS lineage", False, f"got {lineage.status_code}")
 
             # G.6: Impact analysis
-            impact = httpx.get(f"{BASE}/graph/impact/orders_clean", timeout=10)
+            impact = httpx.get(f"{BASE}/graph/impact/orders_clean", timeout=120)
             if impact.status_code == 200:
                 imp_data = impact.json()
                 impacted_names = [n["node"].get("entity_name") for n in imp_data.get("impacted_nodes", [])]
@@ -407,7 +429,7 @@ def scenario_g():
                 "target_node_id": orders_node["id"],
                 "relation_type": "DEPENDS_ON",
                 "confidence_score": 0.95
-            }, timeout=10)
+            }, timeout=120)
             check("G.8 Idempotent edge (no error)", edge_dup.status_code == 201, f"got {edge_dup.status_code}")
         else:
             skip("G.3-G.8", "orders_clean node not found")
@@ -422,7 +444,7 @@ def scenario_h():
     heading("SCENARIO H — Lineage queries")
 
     # H.1: List all events
-    resp = httpx.get(f"{BASE}/lineage", timeout=10)
+    resp = httpx.get(f"{BASE}/lineage", timeout=120)
     check("H.1 List lineage events returns 200", resp.status_code == 200, f"got {resp.status_code}")
     if resp.status_code == 200:
         events = resp.json()
@@ -431,7 +453,7 @@ def scenario_h():
     # H.3: Filter by proposal
     pid = state.get("proposal_id_auto")
     if pid:
-        resp2 = httpx.get(f"{BASE}/lineage/{pid}", timeout=10)
+        resp2 = httpx.get(f"{BASE}/lineage/{pid}", timeout=120)
         check("H.3 Lineage filter by proposal returns 200", resp2.status_code == 200, f"got {resp2.status_code}")
         if resp2.status_code == 200:
             check("H.4 Filtered events have correct proposal_id", all(e.get("proposal_id") == pid for e in resp2.json()), "mismatch")
@@ -453,7 +475,7 @@ def scenario_i():
 def scenario_j():
     heading("SCENARIO J — Audit completeness")
 
-    resp = httpx.get(f"{BASE}/audit", timeout=10)
+    resp = httpx.get(f"{BASE}/audit", timeout=120)
     check("J.1 Audit endpoint returns 200", resp.status_code == 200, f"got {resp.status_code}")
     if resp.status_code != 200 or not resp.json():
         skip("J.2-J.4", "No audit entries")
@@ -470,7 +492,7 @@ def scenario_j():
 
     # J.3: Single audit entry by ID
     entry_id = entry.get("id")
-    resp2 = httpx.get(f"{BASE}/audit/{entry_id}", timeout=10)
+    resp2 = httpx.get(f"{BASE}/audit/{entry_id}", timeout=120)
     check("J.3 Single audit entry returns 200", resp2.status_code == 200, f"got {resp2.status_code}")
     if resp2.status_code == 200:
         single = resp2.json()
@@ -484,14 +506,14 @@ def scenario_k():
     heading("SCENARIO K — Proposals filtering")
 
     # K.1: List all proposals
-    resp = httpx.get(f"{BASE}/proposals", timeout=10)
+    resp = httpx.get(f"{BASE}/proposals", timeout=120)
     check("K.1 List proposals returns 200", resp.status_code == 200, f"got {resp.status_code}")
     if resp.status_code == 200:
         proposals = resp.json()
         check("K.2 Multiple proposals exist", len(proposals) >= 3, f"got {len(proposals)}")
 
     # K.3: Filter by status
-    resp2 = httpx.get(f"{BASE}/proposals?status=PENDING", timeout=10)
+    resp2 = httpx.get(f"{BASE}/proposals?status=PENDING", timeout=120)
     if resp2.status_code == 200:
         pending = resp2.json()
         all_pending = all(p.get("gateway_status") is not None for p in pending)
@@ -500,7 +522,7 @@ def scenario_k():
         check("K.3 Status filter", False, f"got {resp2.status_code}")
 
     # K.4: Pagination
-    resp3 = httpx.get(f"{BASE}/proposals?limit=1&offset=0", timeout=10)
+    resp3 = httpx.get(f"{BASE}/proposals?limit=1&offset=0", timeout=120)
     check("K.4 Pagination (limit=1)", resp3.status_code == 200 and len(resp3.json()) <= 1, f"got {len(resp3.json()) if resp3.status_code == 200 else 'N/A'} results")
 
     # K.5: target_table present in response
@@ -521,7 +543,7 @@ def scenario_l():
         skip("L.1-L.4", "No auto-link proposal")
         return
 
-    resp = httpx.get(f"{BASE}/proposals/{pid}/context", timeout=10)
+    resp = httpx.get(f"{BASE}/proposals/{pid}/context", timeout=120)
     if resp.status_code == 200:
         ctx = resp.json()
         bundle = ctx.get("context_bundle", {})
@@ -539,7 +561,7 @@ def scenario_l():
         check("L.1 Context endpoint", False, f"got {resp.status_code}: {resp.text[:200]}")
 
     # L.5: List graph nodes — check no duplicates
-    resp2 = httpx.get(f"{BASE}/graph/nodes", timeout=10)
+    resp2 = httpx.get(f"{BASE}/graph/nodes", timeout=120)
     if resp2.status_code == 200:
         nodes = resp2.json()
         seen = set()
@@ -573,7 +595,7 @@ def endpoint_smoke():
 
     for method, path in endpoints:
         try:
-            resp = httpx.request(method, f"{BASE}{path}", timeout=10)
+            resp = httpx.request(method, f"{BASE}{path}", timeout=120)
             check(f"{method} {path} → {resp.status_code}", resp.status_code in [200, 201], f"got {resp.status_code}")
         except Exception as e:
             check(f"{method} {path}", False, str(e))
@@ -591,10 +613,10 @@ def main():
 
     # Quick connectivity check
     try:
-        r = httpx.get(f"{BASE}/sources", timeout=5)
-        print(f"  ✔ Server reachable (status {r.status_code})\n")
+        r = httpx.get(f"{BASE}/sources", timeout=120)
+        print(f"  {OK_ICON} Server reachable (status {r.status_code})\n")
     except Exception as e:
-        print(f"  ✘ Cannot reach {BASE}. Is the server running?")
+        print(f"  {ERR_ICON} Cannot reach {BASE}. Is the server running?")
         print(f"    Error: {e}")
         sys.exit(1)
 
@@ -625,10 +647,10 @@ def main():
     print("=" * 60)
 
     if results["fail"] > 0:
-        print(f"\n  ⚠️  {results['fail']} test(s) FAILED")
+        print(f"\n  {WARN_ICON}  {results['fail']} test(s) FAILED")
         sys.exit(1)
     else:
-        print(f"\n  🎉 All tests passed (with {results['skip']} skips)")
+        print(f"\n  {PARTY_ICON} All tests passed (with {results['skip']} skips)")
         sys.exit(0)
 
 

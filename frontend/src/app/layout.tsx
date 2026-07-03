@@ -15,11 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
-        <link
-          rel="preconnect"
-          href="https://rsms.me/"
-          crossOrigin="anonymous"
-        />
+        <link rel="preconnect" href="https://rsms.me/" crossOrigin="anonymous" />
         <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
       </head>
       <body>

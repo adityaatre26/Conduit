@@ -1,9 +1,21 @@
+"""
+proposals.py
+────────────
+Purpose:
+    FastAPI router defining endpoints for managing generated data transformation proposals.
+
+Use Cases:
+    - GET /api/proposals: Query pending/executed proposals.
+    - POST /api/proposals/{id}/approve: Execute approved proposal code against the warehouse.
+    - POST /api/proposals/{id}/reject: Mark proposal as rejected with reason.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
 from app.database import get_db
-from app.models import Proposal, PipelineSkillsLedger, TableMetadata
+from app.models import Proposal, PipelineSkillsLedger
 from app.schemas import ProposalResponse, ApproveRequest, RejectRequest, ExecutionResult, DriftItem
 from app.services.execution_service import execute_proposal
 # NEW — context bundle retrieval (additive, read-only)
@@ -42,7 +54,9 @@ async def list_proposals(
                 estimated_rows=p.estimated_rows or 0,
                 llm_model_used=p.llm_model_used or "llama-3.3-70b-versatile",
                 description_md=p.description_md,
-                suggested_skills_to_add=p.suggested_skills_to_add
+                suggested_skills_to_add=p.suggested_skills_to_add,
+                enrichment_applied=p.enrichment_applied,
+                extra_params=p.extra_params
             )
         )
     return results
@@ -69,7 +83,9 @@ async def get_proposal(proposal_id: str, db: AsyncSession = Depends(get_db)):
         estimated_rows=proposal.estimated_rows or 0,
         llm_model_used=proposal.llm_model_used or "llama-3.3-70b-versatile",
         description_md=proposal.description_md,
-        suggested_skills_to_add=proposal.suggested_skills_to_add
+        suggested_skills_to_add=proposal.suggested_skills_to_add,
+        enrichment_applied=proposal.enrichment_applied,
+        extra_params=proposal.extra_params
     )
 
 
@@ -93,14 +109,8 @@ async def reject_proposal(proposal_id: str, req: RejectRequest, db: AsyncSession
         
     proposal.status = "REJECTED"
     
-    # STAGE 2/7 FIX: use proposal.target_table instead of hardcoded string
-    table_name = proposal.target_table or "orders_clean"
-    stmt = select(TableMetadata).where(TableMetadata.table_name == table_name)
-    res = await db.execute(stmt)
-    tbl = res.scalars().first()
-    
     ledger_entry = PipelineSkillsLedger(
-        table_id=tbl.id if tbl else None,
+        table_id=None,
         proposal_id=proposal.id,
         skill_name="rejected_by_engineer",
         applied_by_llm_version=None,

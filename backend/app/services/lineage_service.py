@@ -1,8 +1,8 @@
 """
-Data Lineage Service
-Records how data moves through the pipeline.
-record_event() is the only method called from execution_service.py
-as a pure append — no logic in execution_service is changed.
+lineage_service.py
+──────────────────
+Purpose:
+    Provides services to log pipeline execution events in the lineage database.
 """
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -1,3 +1,14 @@
+"""
+gateway_service.py
+──────────────────
+Purpose:
+    Implements the gatekeeper-classifier logic.
+
+Use Cases:
+    - Inspects AI recommendations and overrides them to CONFLICT or SCHEMA_EVOLUTION 
+      based on deterministic rules (confidence score, severity levels, null violations).
+"""
+
 def classify_gateway_state(
     ai_recommendation: str,
     drift_items: list[dict],

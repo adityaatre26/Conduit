@@ -1,19 +1,16 @@
 """
-Extension models for Conduit:
-  - Skill Registry   (schema: conduit_skills)
-  - Relationship Graph (schema: conduit_graph)
-  - Data Lineage     (schema: conduit_lineage)
+extension_models.py
+───────────────────
+Purpose:
+    Defines SQLAlchemy ORM models for additive platform extensions including:
+      - Skill Registry (conduit_skills schema)
+      - Data Lineage (conduit_lineage schema)
+      - Proposal Context (conduit_skills schema)
 
-These models are purely additive.  Nothing in this file touches or
-imports anything from models.py or any existing router/service.
-
-STAGE 1 FIX: Added UniqueConstraint to GraphNode (node_type, entity_id)
-             and GraphEdge (source_node_id, target_node_id, relation_type).
-             Without these, ON CONFLICT DO NOTHING in seed SQL does nothing
-             useful and get_or_create_* can produce duplicates across restarts.
-
-STAGE 1 FIX: Added UniqueConstraint to SkillIssueReference (skill_id, issue_reference)
-             so re-running seed SQL is idempotent.
+Usage:
+    - Used by the Skill Registry service to store, retrieve, and categorize transformation scripts.
+    - Used by the Lineage service to track schema evolution history.
+    - Used by the Context Retrieval service to store pre-generated prompt context bundles.
 """
 from sqlalchemy import (
     Column, Integer, String, Boolean, Float, Text,
@@ -85,48 +82,6 @@ class SkillIssueReference(ExtBase):
     skill_id         = Column(Integer, ForeignKey("conduit_skills.skills.id", ondelete="CASCADE"))
     issue_reference  = Column(String(255), nullable=True)
     resolution_notes = Column(Text, nullable=True)
-
-
-# ─────────────────────────────────────────────
-#  RELATIONSHIP GRAPH  (conduit_graph schema)
-# ─────────────────────────────────────────────
-
-class GraphNode(ExtBase):
-    __tablename__ = "graph_nodes"
-    __table_args__ = (
-        # STAGE 1 FIX: Unique constraint enables ON CONFLICT and prevents duplicate
-        # nodes for the same (type, entity_id) pair across container restarts or
-        # multiple ingest runs.
-        UniqueConstraint("node_type", "entity_id", name="uq_graph_node_type_entity"),
-        {"schema": "conduit_graph"},
-    )
-
-    id            = Column(Integer, primary_key=True, autoincrement=True)
-    node_type     = Column(String(50),  nullable=True)   # TABLE, SKILL, KPI, PROJECT…
-    entity_id     = Column(String(255), nullable=True)
-    entity_name   = Column(String(255), nullable=True)
-    node_metadata = Column("metadata", JSONB, nullable=True)
-
-
-class GraphEdge(ExtBase):
-    __tablename__ = "graph_edges"
-    __table_args__ = (
-        # STAGE 1 FIX: Prevents duplicate edges of the same type between the same
-        # node pair.  get_or_create_edge and ON CONFLICT in seed SQL both rely on
-        # this constraint being present.
-        UniqueConstraint(
-            "source_node_id", "target_node_id", "relation_type",
-            name="uq_graph_edge",
-        ),
-        {"schema": "conduit_graph"},
-    )
-
-    id               = Column(Integer, primary_key=True, autoincrement=True)
-    source_node_id   = Column(Integer, ForeignKey("conduit_graph.graph_nodes.id", ondelete="CASCADE"))
-    target_node_id   = Column(Integer, ForeignKey("conduit_graph.graph_nodes.id", ondelete="CASCADE"))
-    relation_type    = Column(String(100), nullable=True)
-    confidence_score = Column(Float, default=1.0)
-    created_at       = Column(DateTime, default=datetime.utcnow)
 
 
 # ─────────────────────────────────────────────

@@ -1,358 +1,351 @@
 """
-Graph Service
-Manages nodes and directed edges in the conduit_graph schema.
-Supports dependency traversal, lineage BFS, impact analysis, and
-automatic node/edge creation from execution events.
-
-Changes vs original draft:
-  - get_lineage(): tracks visited_edge_ids to prevent duplicate edge entries
-    in the BFS result (same edge was being appended from both endpoints).
-  - NEW: get_impact_analysis() — reverse BFS to find what depends on an entity.
-  - NEW: auto_link_execution() — idempotent graph population from execution results.
-         Called from execution_service.py; never raises.
+graph_service.py
+────────────────
+Purpose:
+    Provides wrapper functions for managing nodes, relationships, and queries in Neo4j.
 """
+
+import json
+import logging
 from typing import List, Optional
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
-from sqlalchemy.exc import IntegrityError
-from app.extension_models import GraphNode, GraphEdge
+from app.core.neo4j_client import neo4j_client
 
+logger = logging.getLogger("conduit.graph_service")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+    logger.addHandler(handler)
+    logger.propagate = False
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Basic CRUD
+#  Basic CRUD (Neo4j Backend)
 # ─────────────────────────────────────────────────────────────────────────────
-
-async def create_node(
-    db: AsyncSession,
-    node_type: str,
-    entity_id: str,
-    entity_name: str,
-    metadata: Optional[dict] = None,
-) -> GraphNode:
-    """Create a graph node and return it."""
-    node = GraphNode(
-        node_type=node_type,
-        entity_id=entity_id,
-        entity_name=entity_name,
-        node_metadata=metadata or {},
-    )
-    db.add(node)
-    await db.commit()
-    await db.refresh(node)
-    return node
-
 
 async def get_or_create_node(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     node_type: str,
     entity_id: str,
     entity_name: str,
     metadata: Optional[dict] = None,
-) -> GraphNode:
+) -> dict:
     """
-    Return an existing node matching (node_type, entity_id),
-    or create a new one.  Idempotent — safe to call multiple times.
-
-    STAGE 5 FIX: IntegrityError catch for race-condition safety.
-    Two concurrent requests may both pass the SELECT check; the DB
-    unique constraint catches the duplicate INSERT, and we re-query.
+    Return an existing node matching entity_id, or create a new one.
+    Also adds the specific node_type label (e.g. :TABLE, :PROJECT, etc.) dynamically and safely.
     """
-    result = await db.execute(
-        select(GraphNode).where(
-            GraphNode.node_type == node_type,
-            GraphNode.entity_id == entity_id,
-        )
-    )
-    existing = result.scalars().first()
-    if existing:
-        return existing
-    try:
-        return await create_node(db, node_type, entity_id, entity_name, metadata)
-    except IntegrityError:
-        await db.rollback()
-        result = await db.execute(
-            select(GraphNode).where(
-                GraphNode.node_type == node_type,
-                GraphNode.entity_id == entity_id,
-            )
-        )
-        return result.scalars().first()
-
-
-async def create_edge(
-    db: AsyncSession,
-    source_node_id: int,
-    target_node_id: int,
-    relation_type: str,
-    confidence_score: float = 1.0,
-) -> GraphEdge:
-    """Create a directed edge between two existing nodes."""
-    edge = GraphEdge(
-        source_node_id=source_node_id,
-        target_node_id=target_node_id,
-        relation_type=relation_type,
-        confidence_score=confidence_score,
-    )
-    db.add(edge)
-    await db.commit()
-    await db.refresh(edge)
-    return edge
-
+    clean_label = "".join([c for c in node_type if c.isalnum() or c == "_"])
+    query = f"""
+    MERGE (n:GraphNode {{entity_id: $entity_id}})
+    SET n:{clean_label}
+    SET n.node_type = $node_type,
+        n.entity_name = $entity_name,
+        n.metadata_json = $metadata_json
+    RETURN id(n) AS id, n.node_type AS node_type, n.entity_id AS entity_id, n.entity_name AS entity_name, n.metadata_json AS metadata_json
+    """
+    metadata_json = json.dumps(metadata or {})
+    records = await neo4j_client.execute_query(query, {
+        "entity_id": entity_id,
+        "node_type": node_type,
+        "entity_name": entity_name,
+        "metadata_json": metadata_json
+    })
+    if not records:
+        raise RuntimeError("Failed to create or retrieve node in Neo4j.")
+    
+    rec = records[0]
+    return {
+        "id": rec["id"],
+        "node_type": rec["node_type"],
+        "entity_id": rec["entity_id"],
+        "entity_name": rec["entity_name"],
+        "node_metadata": json.loads(rec["metadata_json"] or "{}")
+    }
 
 async def get_or_create_edge(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     source_node_id: int,
     target_node_id: int,
     relation_type: str,
     confidence_score: float = 1.0,
-) -> GraphEdge:
+) -> dict:
     """
-    Return an existing edge matching (source, target, relation_type),
-    or create it.  Prevents duplicate edges in auto-linking scenarios.
-
-    STAGE 5 FIX: IntegrityError catch mirrors get_or_create_node().
+    Create a directed edge between two existing nodes in Neo4j.
     """
-    result = await db.execute(
-        select(GraphEdge).where(
-            GraphEdge.source_node_id == source_node_id,
-            GraphEdge.target_node_id == target_node_id,
-            GraphEdge.relation_type == relation_type,
-        )
-    )
-    existing = result.scalars().first()
-    if existing:
-        return existing
-    try:
-        return await create_edge(db, source_node_id, target_node_id, relation_type, confidence_score)
-    except IntegrityError:
-        await db.rollback()
-        result = await db.execute(
-            select(GraphEdge).where(
-                GraphEdge.source_node_id == source_node_id,
-                GraphEdge.target_node_id == target_node_id,
-                GraphEdge.relation_type == relation_type,
-            )
-        )
-        return result.scalars().first()
-
+    clean_rel = "".join([c for c in relation_type if c.isalnum() or c == "_"])
+    query = f"""
+    MATCH (a:GraphNode), (b:GraphNode)
+    WHERE id(a) = $source_node_id AND id(b) = $target_node_id
+    MERGE (a)-[r:{clean_rel}]->(b)
+    SET r.confidence_score = $confidence_score,
+        r.created_at = $created_at
+    RETURN id(r) AS id, id(a) AS source_node_id, id(b) AS target_node_id, type(r) AS relation_type, r.confidence_score AS confidence_score, r.created_at AS created_at
+    """
+    created_at = datetime.utcnow().isoformat()
+    records = await neo4j_client.execute_query(query, {
+        "source_node_id": source_node_id,
+        "target_node_id": target_node_id,
+        "confidence_score": confidence_score,
+        "created_at": created_at
+    })
+    if not records:
+        raise RuntimeError("Failed to create or retrieve edge in Neo4j.")
+    
+    rec = records[0]
+    return {
+        "id": rec["id"],
+        "source_node_id": rec["source_node_id"],
+        "target_node_id": rec["target_node_id"],
+        "relation_type": rec["relation_type"],
+        "confidence_score": rec["confidence_score"],
+        "created_at": datetime.fromisoformat(rec["created_at"]) if rec.get("created_at") else datetime.utcnow()
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  List queries
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_all_nodes(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     node_type: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
-) -> List[GraphNode]:
-    stmt = select(GraphNode)
+) -> List[dict]:
     if node_type:
-        stmt = stmt.where(GraphNode.node_type == node_type)
-    stmt = stmt.order_by(GraphNode.id).offset(offset).limit(limit)
-    result = await db.execute(stmt)
-    return result.scalars().all()
-
+        query = """
+        MATCH (n:GraphNode)
+        WHERE n.node_type = $node_type
+        RETURN id(n) AS id, n.node_type AS node_type, n.entity_id AS entity_id, n.entity_name AS entity_name, n.metadata_json AS metadata_json
+        ORDER BY id
+        SKIP $offset LIMIT $limit
+        """
+        params = {"node_type": node_type, "offset": offset, "limit": limit}
+    else:
+        query = """
+        MATCH (n:GraphNode)
+        RETURN id(n) AS id, n.node_type AS node_type, n.entity_id AS entity_id, n.entity_name AS entity_name, n.metadata_json AS metadata_json
+        ORDER BY id
+        SKIP $offset LIMIT $limit
+        """
+        params = {"offset": offset, "limit": limit}
+        
+    records = await neo4j_client.execute_query(query, params)
+    return [
+        {
+            "id": r["id"],
+            "node_type": r["node_type"],
+            "entity_id": r["entity_id"],
+            "entity_name": r["entity_name"],
+            "node_metadata": json.loads(r["metadata_json"] or "{}")
+        }
+        for r in records
+    ]
 
 async def get_all_edges(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     relation_type: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
-) -> List[GraphEdge]:
-    stmt = select(GraphEdge)
+) -> List[dict]:
     if relation_type:
-        stmt = stmt.where(GraphEdge.relation_type == relation_type)
-    stmt = stmt.order_by(GraphEdge.id).offset(offset).limit(limit)
-    result = await db.execute(stmt)
-    return result.scalars().all()
-
+        query = """
+        MATCH (a:GraphNode)-[r]->(b:GraphNode)
+        WHERE type(r) = $relation_type
+        RETURN id(r) AS id, id(a) AS source_node_id, id(b) AS target_node_id, type(r) AS relation_type, r.confidence_score AS confidence_score, r.created_at AS created_at
+        ORDER BY id
+        SKIP $offset LIMIT $limit
+        """
+        params = {"relation_type": relation_type, "offset": offset, "limit": limit}
+    else:
+        query = """
+        MATCH (a:GraphNode)-[r]->(b:GraphNode)
+        RETURN id(r) AS id, id(a) AS source_node_id, id(b) AS target_node_id, type(r) AS relation_type, r.confidence_score AS confidence_score, r.created_at AS created_at
+        ORDER BY id
+        SKIP $offset LIMIT $limit
+        """
+        params = {"offset": offset, "limit": limit}
+        
+    records = await neo4j_client.execute_query(query, params)
+    return [
+        {
+            "id": r["id"],
+            "source_node_id": r["source_node_id"],
+            "target_node_id": r["target_node_id"],
+            "relation_type": r["relation_type"],
+            "confidence_score": r["confidence_score"],
+            "created_at": datetime.fromisoformat(r["created_at"]) if r.get("created_at") else datetime.utcnow()
+        }
+        for r in records
+    ]
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Traversal
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_neighbors(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     node_id: int,
-    direction: str = "both",   # "out" | "in" | "both"
+    direction: str = "both",
 ) -> dict:
-    """
-    Return all nodes one hop away from node_id, with their connecting edge.
-
-    Returns:
-        {
-            "outbound": [{"edge": GraphEdge, "node": GraphNode}],
-            "inbound":  [{"edge": GraphEdge, "node": GraphNode}],
-        }
-    """
     outbound = []
-    inbound  = []
-
+    inbound = []
+    
     if direction in ("out", "both"):
-        res = await db.execute(
-            select(GraphEdge).where(GraphEdge.source_node_id == node_id)
-        )
-        for edge in res.scalars().all():
-            node_res = await db.execute(
-                select(GraphNode).where(GraphNode.id == edge.target_node_id)
-            )
-            node = node_res.scalars().first()
-            if node:
-                outbound.append({"edge": edge, "node": node})
+        query = """
+        MATCH (n:GraphNode)-[r]->(m:GraphNode)
+        WHERE id(n) = $node_id
+        RETURN id(r) AS edge_id, id(n) AS src_id, id(m) AS tgt_id, type(r) AS rel_type, r.confidence_score AS score, r.created_at AS created,
+               id(m) AS m_id, m.node_type AS m_type, m.entity_id AS m_eid, m.entity_name AS m_ename, m.metadata_json AS m_meta
+        """
+        records = await neo4j_client.execute_query(query, {"node_id": node_id})
+        for r in records:
+            edge = {
+                "id": r["edge_id"],
+                "source_node_id": r["src_id"],
+                "target_node_id": r["tgt_id"],
+                "relation_type": r["rel_type"],
+                "confidence_score": r["score"],
+                "created_at": datetime.fromisoformat(r["created"]) if r.get("created") else datetime.utcnow()
+            }
+            node = {
+                "id": r["m_id"],
+                "node_type": r["m_type"],
+                "entity_id": r["m_eid"],
+                "entity_name": r["m_ename"],
+                "node_metadata": json.loads(r["m_meta"] or "{}")
+            }
+            outbound.append({"edge": edge, "node": node})
 
     if direction in ("in", "both"):
-        res = await db.execute(
-            select(GraphEdge).where(GraphEdge.target_node_id == node_id)
-        )
-        for edge in res.scalars().all():
-            node_res = await db.execute(
-                select(GraphNode).where(GraphNode.id == edge.source_node_id)
-            )
-            node = node_res.scalars().first()
-            if node:
-                inbound.append({"edge": edge, "node": node})
+        query = """
+        MATCH (m:GraphNode)-[r]->(n:GraphNode)
+        WHERE id(n) = $node_id
+        RETURN id(r) AS edge_id, id(m) AS src_id, id(n) AS tgt_id, type(r) AS rel_type, r.confidence_score AS score, r.created_at AS created,
+               id(m) AS m_id, m.node_type AS m_type, m.entity_id AS m_eid, m.entity_name AS m_ename, m.metadata_json AS m_meta
+        """
+        records = await neo4j_client.execute_query(query, {"node_id": node_id})
+        for r in records:
+            edge = {
+                "id": r["edge_id"],
+                "source_node_id": r["src_id"],
+                "target_node_id": r["tgt_id"],
+                "relation_type": r["rel_type"],
+                "confidence_score": r["score"],
+                "created_at": datetime.fromisoformat(r["created"]) if r.get("created") else datetime.utcnow()
+            }
+            node = {
+                "id": r["m_id"],
+                "node_type": r["m_type"],
+                "entity_id": r["m_eid"],
+                "entity_name": r["m_ename"],
+                "node_metadata": json.loads(r["m_meta"] or "{}")
+            }
+            inbound.append({"edge": edge, "node": node})
 
     return {"outbound": outbound, "inbound": inbound}
 
-
 async def get_lineage(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     entity_name: str,
     max_depth: int = 5,
 ) -> dict:
+    pattern = f"(?i).*{entity_name}.*"
+    query_start = """
+    MATCH (n:GraphNode)
+    WHERE n.entity_name =~ $pattern OR n.entity_id =~ $pattern
+    RETURN id(n) AS id, n.node_type AS node_type, n.entity_id AS entity_id, n.entity_name AS entity_name, n.metadata_json AS metadata_json
     """
-    BFS traversal starting from any node whose entity_name (or entity_id)
-    matches.  Returns all reachable nodes and edges within max_depth hops.
+    start_records = await neo4j_client.execute_query(query_start, {"pattern": pattern})
+    if not start_records:
+        return {"nodes": [], "edges": []}
 
-    BUG FIX: added visited_edge_ids to prevent duplicate edges.
-    The original code appended the same GraphEdge object each time either
-    of its endpoints was visited, resulting in duplicates in collected_edges.
+    start_ids = [r["id"] for r in start_records]
+    nodes_map = {}
+    edges_map = {}
+
+    for r in start_records:
+        nodes_map[r["id"]] = {
+            "id": r["id"],
+            "node_type": r["node_type"],
+            "entity_id": r["entity_id"],
+            "entity_name": r["entity_name"],
+            "node_metadata": json.loads(r["metadata_json"] or "{}")
+        }
+
+    query_nodes = f"""
+    MATCH path = (start:GraphNode)-[*1..{max_depth}]-(end:GraphNode)
+    WHERE id(start) IN $start_ids
+    UNWIND nodes(path) AS n
+    RETURN DISTINCT id(n) AS id, n.node_type AS node_type, n.entity_id AS entity_id, n.entity_name AS entity_name, n.metadata_json AS metadata_json
     """
-    # Find starting nodes
-    start_res = await db.execute(
-        select(GraphNode).where(
-            or_(
-                GraphNode.entity_name.ilike(f"%{entity_name}%"),
-                GraphNode.entity_id.ilike(f"%{entity_name}%"),
-            )
-        )
-    )
-    start_nodes = start_res.scalars().all()
+    node_records = await neo4j_client.execute_query(query_nodes, {"start_ids": start_ids})
+    for r in node_records:
+        nodes_map[r["id"]] = {
+            "id": r["id"],
+            "node_type": r["node_type"],
+            "entity_id": r["entity_id"],
+            "entity_name": r["entity_name"],
+            "node_metadata": json.loads(r["metadata_json"] or "{}")
+        }
 
-    visited_node_ids: set = set()
-    visited_edge_ids: set = set()   # ← FIX: was missing
-    collected_nodes:  List[GraphNode] = []
-    collected_edges:  List[GraphEdge] = []
+    query_rels = f"""
+    MATCH path = (start:GraphNode)-[*1..{max_depth}]-(end:GraphNode)
+    WHERE id(start) IN $start_ids
+    UNWIND relationships(path) AS r
+    RETURN DISTINCT id(r) AS id, id(startNode(r)) AS source_node_id, id(endNode(r)) AS target_node_id, type(r) AS relation_type, r.confidence_score AS confidence_score, r.created_at AS created_at
+    """
+    rel_records = await neo4j_client.execute_query(query_rels, {"start_ids": start_ids})
+    for r in rel_records:
+        edges_map[r["id"]] = {
+            "id": r["id"],
+            "source_node_id": r["source_node_id"],
+            "target_node_id": r["target_node_id"],
+            "relation_type": r["relation_type"],
+            "confidence_score": r.get("confidence_score", 1.0),
+            "created_at": datetime.fromisoformat(r["created_at"]) if r.get("created_at") else datetime.utcnow()
+        }
 
-    queue = [(n.id, 0) for n in start_nodes]
-    for n in start_nodes:
-        visited_node_ids.add(n.id)
-        collected_nodes.append(n)
-
-    while queue:
-        current_id, depth = queue.pop(0)
-        if depth >= max_depth:
-            continue
-
-        edges_res = await db.execute(
-            select(GraphEdge).where(
-                or_(
-                    GraphEdge.source_node_id == current_id,
-                    GraphEdge.target_node_id == current_id,
-                )
-            )
-        )
-        edges = edges_res.scalars().all()
-
-        for edge in edges:
-            # ← FIX: only append each edge once
-            if edge.id not in visited_edge_ids:
-                visited_edge_ids.add(edge.id)
-                collected_edges.append(edge)
-
-            for next_id in (edge.source_node_id, edge.target_node_id):
-                if next_id not in visited_node_ids:
-                    visited_node_ids.add(next_id)
-                    node_res = await db.execute(
-                        select(GraphNode).where(GraphNode.id == next_id)
-                    )
-                    node = node_res.scalars().first()
-                    if node:
-                        collected_nodes.append(node)
-                        queue.append((next_id, depth + 1))
-
-    return {"nodes": collected_nodes, "edges": collected_edges}
-
+    return {"nodes": list(nodes_map.values()), "edges": list(edges_map.values())}
 
 async def get_dependencies(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     node_id: int,
-) -> List[GraphNode]:
-    """Return all nodes that node_id directly DEPENDS_ON."""
-    edges_res = await db.execute(
-        select(GraphEdge).where(
-            GraphEdge.source_node_id == node_id,
-            GraphEdge.relation_type == "DEPENDS_ON",
-        )
-    )
-    edges = edges_res.scalars().all()
-
-    deps: List[GraphNode] = []
-    for edge in edges:
-        node_res = await db.execute(
-            select(GraphNode).where(GraphNode.id == edge.target_node_id)
-        )
-        node = node_res.scalars().first()
-        if node:
-            deps.append(node)
-    return deps
-
+) -> List[dict]:
+    query = """
+    MATCH (n:GraphNode)-[:DEPENDS_ON]->(m:GraphNode)
+    WHERE id(n) = $node_id
+    RETURN id(m) AS id, m.node_type AS node_type, m.entity_id AS entity_id, m.entity_name AS entity_name, m.metadata_json AS metadata_json
+    """
+    records = await neo4j_client.execute_query(query, {"node_id": node_id})
+    return [
+        {
+            "id": r["id"],
+            "node_type": r["node_type"],
+            "entity_id": r["entity_id"],
+            "entity_name": r["entity_name"],
+            "node_metadata": json.loads(r["metadata_json"] or "{}")
+        }
+        for r in records
+    ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  NEW: Impact analysis
+#  Impact analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_impact_analysis(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     entity_name: str,
     max_depth: int = 4,
 ) -> dict:
+    pattern = f"(?i).*{entity_name}.*"
+    query_start = """
+    MATCH (n:GraphNode)
+    WHERE n.entity_name =~ $pattern OR n.entity_id =~ $pattern
+    RETURN id(n) AS id, n.node_type AS node_type, n.entity_id AS entity_id, n.entity_name AS entity_name, n.metadata_json AS metadata_json
     """
-    Reverse BFS: given an entity, discover every upstream node that
-    depends on it (directly or transitively).
-
-    Use case:
-        "customer_id is changing from INT → VARCHAR.  What breaks?"
-        → Graph traverses: customers → orders → invoices → revenue_dashboard
-
-    Returns:
-        {
-            "entity":          str,
-            "start_nodes":     [GraphNode],   # nodes matching the entity name
-            "impacted_nodes":  [
-                {
-                    "node":          GraphNode,
-                    "depth":         int,
-                    "relation_type": str,
-                    "path":          [str],  # entity names from target to this node
-                }
-            ],
-            "total_impacted":  int,
-        }
-    """
-    # 1. Find entity start nodes
-    start_res = await db.execute(
-        select(GraphNode).where(
-            or_(
-                GraphNode.entity_name.ilike(f"%{entity_name}%"),
-                GraphNode.entity_id.ilike(f"%{entity_name}%"),
-            )
-        )
-    )
-    start_nodes: List[GraphNode] = start_res.scalars().all()
-
-    if not start_nodes:
+    start_records = await neo4j_client.execute_query(query_start, {"pattern": pattern})
+    if not start_records:
         return {
             "entity": entity_name,
             "start_nodes": [],
@@ -360,39 +353,51 @@ async def get_impact_analysis(
             "total_impacted": 0,
         }
 
-    # 2. BFS in reverse direction — find nodes with edges pointing TO the target
-    visited: set = set(n.id for n in start_nodes)
-    impacted: List[dict] = []
+    start_ids = [r["id"] for r in start_records]
+    start_nodes = [
+        {
+            "id": r["id"],
+            "node_type": r["node_type"],
+            "entity_id": r["entity_id"],
+            "entity_name": r["entity_name"],
+            "node_metadata": json.loads(r["metadata_json"] or "{}")
+        }
+        for r in start_records
+    ]
 
-    # queue: (node_id, depth, path_so_far, relation_type_used)
-    queue = [(n.id, 0, [n.entity_name or n.entity_id], "") for n in start_nodes]
+    query_impact = f"""
+    MATCH path = shortestPath((upstream:GraphNode)-[*1..{max_depth}]->(start:GraphNode))
+    WHERE id(start) IN $start_ids AND id(upstream) <> id(start)
+    RETURN id(upstream) AS id, upstream.node_type AS node_type, upstream.entity_id AS entity_id,
+           upstream.entity_name AS entity_name, upstream.metadata_json AS metadata_json,
+           length(path) AS depth, [x IN nodes(path) | x.entity_name] AS path_names,
+           type(relationships(path)[0]) AS rel_type
+    """
+    records = await neo4j_client.execute_query(query_impact, {"start_ids": start_ids})
 
-    while queue:
-        current_id, depth, path, rel = queue.pop(0)
-        if depth >= max_depth:
+    impacted = []
+    seen = set()
+    for r in records:
+        u_id = r["id"]
+        if u_id in seen:
             continue
-
-        # Edges where the CURRENT node is the TARGET (i.e. source depends on us)
-        edges_res = await db.execute(
-            select(GraphEdge).where(GraphEdge.target_node_id == current_id)
-        )
-        for edge in edges_res.scalars().all():
-            src_id = edge.source_node_id
-            if src_id not in visited:
-                visited.add(src_id)
-                node_res = await db.execute(
-                    select(GraphNode).where(GraphNode.id == src_id)
-                )
-                node = node_res.scalars().first()
-                if node:
-                    new_path = path + [node.entity_name or node.entity_id]
-                    impacted.append({
-                        "node": node,
-                        "depth": depth + 1,
-                        "relation_type": edge.relation_type,
-                        "path": new_path,
-                    })
-                    queue.append((src_id, depth + 1, new_path, edge.relation_type))
+        seen.add(u_id)
+        
+        reversed_path = list(reversed(r["path_names"]))
+        rel_type = r.get("rel_type") or "DEPENDS_ON"
+        
+        impacted.append({
+            "node": {
+                "id": u_id,
+                "node_type": r["node_type"],
+                "entity_id": r["entity_id"],
+                "entity_name": r["entity_name"],
+                "node_metadata": json.loads(r["metadata_json"] or "{}")
+            },
+            "depth": r["depth"],
+            "relation_type": rel_type,
+            "path": reversed_path,
+        })
 
     return {
         "entity": entity_name,
@@ -401,66 +406,108 @@ async def get_impact_analysis(
         "total_impacted": len(impacted),
     }
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-#  NEW: Execution auto-linking
+#  Execution auto-linking
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def auto_link_execution(
-    db: AsyncSession,
+    db: Optional[AsyncSession],
     proposal_id: str,
     source_filename: str,
     target_table: str,
     skill_name: Optional[str] = None,
 ) -> None:
     """
-    Auto-populate the relationship graph after a successful execution.
-
-    Creates:
-        FILE node  ──TRANSFORMS_INTO──▶  TABLE node
-        TABLE node ──USES_SKILL──────▶  SKILL node  (if skill_name given)
-        PIPELINE node ──GENERATED_BY──▶  TABLE node
-
-    All operations are idempotent (get_or_create_edge).
-    Never raises — wrapped so it cannot break the execution flow.
+    Auto-populate the relationship graph in Neo4j after a successful execution.
+    Uses canonical tbl-{table} entity IDs consistent with the knowledge graph.
     """
     try:
-        # FILE node representing the uploaded CSV
+        from app.services import graph_knowledge_service
+        table_eid = graph_knowledge_service.table_entity_id(target_table)
+
         file_node = await get_or_create_node(
             db, "FILE", source_filename, source_filename,
             {"proposal_id": proposal_id},
         )
 
-        # TABLE node representing the target warehouse table
         table_node = await get_or_create_node(
-            db, "TABLE", target_table, target_table, {}
+            db, "STORAGE_UNIT", table_eid, target_table, {}
         )
 
-        # FILE ──TRANSFORMS_INTO──▶ TABLE
         await get_or_create_edge(
-            db, file_node.id, table_node.id, "TRANSFORMS_INTO", 1.0
+            db, file_node["id"], table_node["id"], "TRANSFORMS_INTO", 1.0
         )
 
-        # PIPELINE node  (tracks the proposal itself)
         pipeline_node = await get_or_create_node(
             db, "PIPELINE", proposal_id, f"pipeline_{proposal_id[:8]}",
             {"proposal_id": proposal_id},
         )
-        # PIPELINE ──GENERATED_BY──▶ TABLE
         await get_or_create_edge(
-            db, pipeline_node.id, table_node.id, "GENERATED_BY", 1.0
+            db, pipeline_node["id"], table_node["id"], "GENERATED_BY", 1.0
         )
 
-        # SKILL node (the transformation skill applied)
         if skill_name:
             skill_node = await get_or_create_node(
-                db, "SKILL", skill_name, skill_name, {"auto_linked": True}
+                db, "SKILL", f"skill-{skill_name}", skill_name, {"auto_linked": True}
             )
-            # TABLE ──USES_SKILL──▶ SKILL
             await get_or_create_edge(
-                db, table_node.id, skill_node.id, "USES_SKILL", 1.0
+                db, table_node["id"], skill_node["id"], "USES_SKILL", 1.0
             )
+    except Exception as exc:
+        logger.error(f"Failed to auto-link execution: {exc}")
 
-    except Exception:
-        # Must never propagate — graph linking is supplemental
-        pass
+# ─────────────────────────────────────────────────────────────────────────────
+#  Metadata sync — delegated to connector → graph pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def sync_metadata_catalog_from_pg(db: AsyncSession) -> None:
+    """
+    Deprecated: PG catalog is no longer the knowledge source.
+    Use connector_introspection_service.sync_connection_to_graph() instead.
+    Kept as a no-op wrapper so existing /graph/sync callers don't break.
+    """
+    from app.services import graph_knowledge_service
+    logger.info("PG catalog sync skipped — knowledge graph is fed by connectors.")
+    await graph_knowledge_service.seed_demo_knowledge()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Audit Logs Linkage (PG query)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_audit_history_for_node(
+    entity_id: str,
+    db: AsyncSession,
+) -> List[dict]:
+    """
+    Query PostgreSQL audit ledger for records linked to a Neo4j entity_id.
+    """
+    from sqlalchemy import select
+    from app.models import PipelineSkillsLedger, Proposal
+
+    stmt = (
+        select(PipelineSkillsLedger, Proposal)
+        .join(Proposal, PipelineSkillsLedger.proposal_id == Proposal.id, isouter=True)
+        .where(PipelineSkillsLedger.graph_node_id == entity_id)
+        .order_by(PipelineSkillsLedger.executed_at.desc())
+    )
+    
+    res = await db.execute(stmt)
+    rows = res.all()
+    
+    history = []
+    for ledger, proposal in rows:
+        history.append({
+            "id": ledger.id,
+            "proposal_id": proposal.id if proposal else "unknown",
+            "filename": proposal.filename if proposal else "unknown",
+            "skill_name": ledger.skill_name,
+            "applied_by_llm_version": ledger.applied_by_llm_version,
+            "transformation_script_ref": ledger.transformation_script_ref,
+            "human_approver_id": ledger.human_approver_id,
+            "execution_status": ledger.execution_status,
+            "executed_at": ledger.executed_at.isoformat() if ledger.executed_at else None,
+            "graph_node_id": ledger.graph_node_id,
+            "llm_prompt_sent": proposal.llm_prompt_sent if proposal else "",
+            "llm_raw_response": proposal.llm_raw_response if proposal else "",
+        })
+    return history

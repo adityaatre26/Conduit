@@ -12,3 +12,25 @@ node_modules/
 .next/
 out/
 *.tsbuildinfo
+
+# Virtual Environments
+.venv/
+backend/.venv/
+
+# Editor Settings
+.idea/
+.vscode/
+
+# Build and Distribution Directories
+dist/
+build/
+
+# Testing and Coverage
+coverage/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS Metadata
+Thumbs.db
+

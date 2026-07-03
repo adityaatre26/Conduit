@@ -1,15 +1,12 @@
 """
-Pydantic schemas for the Conduit extension layer.
-These schemas are purely additive — nothing in schemas.py is changed.
+extension_schemas.py
+────────────────────
+Purpose:
+    Defines Pydantic models for request/response serialization 
+    within the additive platform extensions (Skill Registry, Graph, Lineage, Context).
 
-Added in this version:
-  - CreateGraphNodeRequest / CreateGraphEdgeRequest
-  - UpdateSkillRequest
-  - AddSkillScriptRequest / AddSkillIssueRequest
-  - NeighborDetail / NeighborsResponse
-  - ImpactedNode / ImpactAnalysisResponse
-  - ProposalContextResponse
-  - SkillSearchResponse (alias for list endpoint clarity)
+Usage:
+    - Provides data validation and serialization/deserialization for routers in the extension layer.
 """
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any, Dict
@@ -49,10 +46,7 @@ class CreateSkillRequest(BaseModel):
 
 
 class UpdateSkillRequest(BaseModel):
-    """
-    Partial update for a skill.  Only provided fields are written —
-    omitted fields keep their current value.
-    """
+    """Partial update — only provided fields are written."""
     status: Optional[str] = Field(
         default=None,
         description="One of: ACTIVE | DEPRECATED | DRAFT",
@@ -106,15 +100,15 @@ class GraphNodeResponse(BaseModel):
     node_type: Optional[str] = None
     entity_id: Optional[str] = None
     entity_name: Optional[str] = None
-    # validation_alias lets Pydantic read the ORM attribute `node_metadata`
-    # but serialise it as `metadata` in JSON output.
+    # validation_alias: Pydantic reads ORM attribute `node_metadata`,
+    # serialises it as `metadata` in JSON output.
     metadata: Optional[Dict[str, Any]] = Field(
         default=None, validation_alias="node_metadata"
     )
 
     class Config:
         from_attributes = True
-        populate_by_name = True   # allow both field name and alias
+        populate_by_name = True
 
 
 class GraphEdgeResponse(BaseModel):
@@ -136,7 +130,6 @@ class LineageGraphResponse(BaseModel):
 
 
 class CreateGraphNodeRequest(BaseModel):
-    """Request body for POST /api/graph/nodes."""
     node_type: str = Field(
         ...,
         description="E.g. TABLE | SKILL | KPI | PROJECT | WAREHOUSE | COLUMN | FILE | PIPELINE",
@@ -145,18 +138,11 @@ class CreateGraphNodeRequest(BaseModel):
         ...,
         description="Stable unique identifier for this entity (e.g. table name, skill name).",
     )
-    entity_name: str = Field(
-        ...,
-        description="Human-readable display name.",
-    )
-    metadata: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Arbitrary JSONB metadata attached to the node.",
-    )
+    entity_name: str = Field(..., description="Human-readable display name.")
+    metadata: Optional[Dict[str, Any]] = Field(default=None)
 
 
 class CreateGraphEdgeRequest(BaseModel):
-    """Request body for POST /api/graph/edges."""
     source_node_id: int
     target_node_id: int
     relation_type: str = Field(
@@ -170,35 +156,26 @@ class CreateGraphEdgeRequest(BaseModel):
 
 
 class NeighborDetail(BaseModel):
-    """One node adjacent to a queried node, with the connecting edge."""
-    direction: str          # "outbound" | "inbound"
+    direction: str           # "outbound" | "inbound"
     relation_type: Optional[str]
     confidence_score: float
     node: GraphNodeResponse
 
 
 class NeighborsResponse(BaseModel):
-    """All immediate neighbours of a node."""
     node_id: int
     neighbors: List[NeighborDetail]
     total: int
 
 
 class ImpactedNode(BaseModel):
-    """A single node affected by a change to the queried entity."""
     node: GraphNodeResponse
-    depth: int              # how many hops from the entity
-    relation_type: str      # the edge type that created this dependency
-    path: List[str]         # entity names from target → this node
+    depth: int
+    relation_type: str
+    path: List[str]
 
 
 class ImpactAnalysisResponse(BaseModel):
-    """
-    Full impact analysis result.
-
-    Usage: GET /api/graph/impact/{entity}
-    Answers: "If {entity} changes, what else might break?"
-    """
     entity: str
     start_nodes: List[GraphNodeResponse]
     impacted_nodes: List[ImpactedNode]
@@ -227,11 +204,6 @@ class LineageEventResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ProposalContextResponse(BaseModel):
-    """
-    The rich context bundle stored alongside a proposal.
-    Phase 1: built at ingest time, stored but not injected into the LLM.
-    Phase 2+: will be used to enrich the prompt.
-    """
     proposal_id: str
     target_table: Optional[str] = None
     context_bundle: Optional[Dict[str, Any]] = None

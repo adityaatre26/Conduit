@@ -1,3 +1,14 @@
+"""
+audit.py
+────────
+Purpose:
+    FastAPI router defining endpoints for retrieving the immutable execution audit ledger.
+
+Use Cases:
+    - GET /api/audit: List compliance audit logs.
+    - GET /api/audit/{id}: Fetch detailed audit entry with LLM prompt and executed code.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select

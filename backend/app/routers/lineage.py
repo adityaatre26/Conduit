@@ -1,5 +1,11 @@
 """
-Lineage API router — additive endpoints only.
+lineage.py
+──────────
+Purpose:
+    FastAPI router defining endpoints for data lineage audit events.
+
+Use Cases:
+    - GET /api/lineage: List chronological system operational history (ingestion, schema change).
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession

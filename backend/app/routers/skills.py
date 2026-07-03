@@ -1,15 +1,12 @@
 """
-Skills API router — additive endpoints only.
-Existing /api/* routes are NOT touched.
+skills.py
+─────────
+Purpose:
+    FastAPI router defining endpoints for the transformation Skill Registry.
 
-Endpoints:
-  GET    /api/skills                         list / filter skills
-  POST   /api/skills                         register a new skill
-  GET    /api/skills/search                  keyword search
-  GET    /api/skills/{skill_id}              full detail with children
-  PATCH  /api/skills/{skill_id}              partial update (status, owner, …)
-  POST   /api/skills/{skill_id}/scripts      attach a script reference
-  POST   /api/skills/{skill_id}/issues       link a historical incident
+Use Cases:
+    - POST /api/skills: Register new reusable transformation skills.
+    - GET /api/skills: Query skill specifications, incidents, and example mappings.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession

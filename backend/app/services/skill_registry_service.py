@@ -1,8 +1,8 @@
 """
-Skill Registry Service
-Responsibilities: register, retrieve, list, and search skills.
-All operations are purely additive — this service never touches
-any table in the conduit schema.
+skill_registry_service.py
+─────────────────────────
+Purpose:
+    Manages the registry of reusable transformation skills.
 """
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,6 +100,19 @@ async def register_skill(
     except Exception as e:
         # Prevent auto-generation issues from breaking the main transaction, log error
         print(f"Failed to auto-generate and save skill script: {e}")
+
+    # Mirror skill into Neo4j knowledge graph for AI context retrieval
+    try:
+        from app.services import graph_knowledge_service
+        await graph_knowledge_service.upsert_skill(
+            skill_name=skill_name,
+            category=category,
+            description=description,
+            use_cases=use_cases,
+            status="ACTIVE",
+        )
+    except Exception:
+        pass
 
     return skill
 

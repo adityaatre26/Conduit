@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import clsx from "clsx";
 
 const PRIMARY = [
@@ -61,8 +62,63 @@ function NavGroup({
   );
 }
 
+type BackendStatus = "checking" | "online" | "offline";
+
+function useBackendStatus() {
+  const [status, setStatus] = useState<BackendStatus>("checking");
+  const [mockAi, setMockAi] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await fetch("/api/health", { cache: "no-store" });
+        if (!res.ok) throw new Error("not ok");
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled) {
+          setStatus("online");
+          if (typeof data?.mock_ai === "boolean") setMockAi(data.mock_ai);
+        }
+      } catch {
+        if (!cancelled) setStatus("offline");
+      }
+    };
+    check();
+    const interval = setInterval(check, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  return { status, mockAi };
+}
+
 export function Sidebar() {
   const pathname = usePathname();
+  const { status, mockAi } = useBackendStatus();
+
+  const dotColor =
+    status === "checking"
+      ? "bg-fg-subtle animate-pulse"
+      : status === "online"
+      ? "bg-success"
+      : "bg-danger";
+
+  const statusLabel =
+    status === "checking"
+      ? "Connecting…"
+      : status === "online"
+      ? mockAi === true
+        ? "Backend · mock AI"
+        : "Backend · live"
+      : "Backend offline";
+
+  const statusSub =
+    status === "online"
+      ? mockAi === true
+        ? "MOCK_AI=True · no Groq calls"
+        : "MOCK_AI=False · Groq active"
+      : status === "checking"
+      ? "checking /api/health"
+      : "cannot reach localhost:8000";
 
   return (
     <aside className="w-56 shrink-0 border-r border-border-subtle bg-white flex flex-col h-screen sticky top-0">
@@ -84,11 +140,11 @@ export function Sidebar() {
 
       <div className="border-t border-border-subtle p-3">
         <div className="flex items-center gap-2 text-xs text-fg-muted">
-          <span className="w-1.5 h-1.5 rounded-full bg-success" />
-          <span>API connected</span>
+          <span className={clsx("w-1.5 h-1.5 rounded-full shrink-0", dotColor)} />
+          <span className="truncate">{statusLabel}</span>
         </div>
-        <div className="mt-1 text-2xs text-fg-subtle font-mono">
-          localhost:8000
+        <div className="mt-1 text-2xs text-fg-subtle font-mono truncate">
+          {statusSub}
         </div>
       </div>
     </aside>

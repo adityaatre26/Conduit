@@ -1,12 +1,11 @@
 """
-Post-load insight generation service.
+insight_service.py
+──────────────────
+Purpose:
+    Performs statistical analyses on dataframes to extract insights.
 
-After data lands in Postgres, this service runs statistical analysis on the
-transformed DataFrame and then calls the LLM to generate natural-language
-insights about patterns, anomalies, and data quality issues.
-
-All operations are wrapped in try/except — insight failure never blocks the
-main execution pipeline.
+Use Cases:
+    - Scans for outliers, anomalies, and duplicate records.
 """
 
 import json
@@ -54,7 +53,7 @@ def _compute_stats(df: pd.DataFrame) -> dict:
             ) if len(top_vals) > 0 else 0
 
         # Numeric stats
-        if pd.api.types.is_numeric_dtype(df[col]):
+        if pd.api.types.is_numeric_dtype(df[col]) and not pd.api.types.is_bool_dtype(df[col]):
             col_stats["mean"] = round(float(df[col].mean()), 2) if not df[col].isna().all() else None
             col_stats["median"] = round(float(df[col].median()), 2) if not df[col].isna().all() else None
             col_stats["std"] = round(float(df[col].std()), 2) if not df[col].isna().all() else None

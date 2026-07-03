@@ -1,3 +1,13 @@
+"""
+quarantine.py
+─────────────
+Purpose:
+    FastAPI router defining endpoints for inspecting quarantined rows.
+
+Use Cases:
+    - GET /api/quarantine: Retrieves rows that failed validation constraints during execution.
+"""
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select

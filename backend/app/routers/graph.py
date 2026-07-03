@@ -1,15 +1,12 @@
 """
-Graph API router — all endpoints are additive.
-Existing /api/* routes are untouched.
+graph.py
+────────
+Purpose:
+    FastAPI router defining endpoints for interacting with the Neo4j relationship graph.
 
-Endpoints:
-  GET  /api/graph/nodes                  list nodes
-  POST /api/graph/nodes                  create node
-  GET  /api/graph/edges                  list edges
-  POST /api/graph/edges                  create edge
-  GET  /api/graph/neighbors/{node_id}    immediate neighbours
-  GET  /api/graph/lineage/{entity}       BFS traversal
-  GET  /api/graph/impact/{entity}        reverse BFS — what depends on this?
+Use Cases:
+    - Traverses nodes/edges in the database network.
+    - Runs impact analysis and lineage tracing queries using BFS traversal.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +44,16 @@ async def list_nodes(
     nodes = await graph_service.get_all_nodes(
         db, node_type=node_type, limit=limit, offset=offset
     )
-    return [GraphNodeResponse.model_validate(n) for n in nodes]
+    return [
+        GraphNodeResponse(
+            id=n["id"],
+            node_type=n["node_type"],
+            entity_id=n["entity_id"],
+            entity_name=n["entity_name"],
+            metadata=n["node_metadata"]
+        )
+        for n in nodes
+    ]
 
 
 @router.post("/graph/nodes", response_model=GraphNodeResponse, status_code=201)
@@ -56,12 +62,7 @@ async def create_node(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Create a new graph node.
-
-    Use get_or_create semantics when you want idempotent creation
-    (same node_type + entity_id → returns existing node).
-    This endpoint always creates — use the /lineage or /neighbors
-    reads first to check if a node already exists.
+    Create or retrieve a graph node idempotently.
     """
     try:
         node = await graph_service.get_or_create_node(
@@ -71,7 +72,13 @@ async def create_node(
             entity_name=req.entity_name,
             metadata=req.metadata,
         )
-        return GraphNodeResponse.model_validate(node)
+        return GraphNodeResponse(
+            id=node["id"],
+            node_type=node["node_type"],
+            entity_id=node["entity_id"],
+            entity_name=node["entity_name"],
+            metadata=node["node_metadata"]
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -91,7 +98,17 @@ async def list_edges(
     edges = await graph_service.get_all_edges(
         db, relation_type=relation_type, limit=limit, offset=offset
     )
-    return [GraphEdgeResponse.model_validate(e) for e in edges]
+    return [
+        GraphEdgeResponse(
+            id=e["id"],
+            source_node_id=e["source_node_id"],
+            target_node_id=e["target_node_id"],
+            relation_type=e["relation_type"],
+            confidence_score=e["confidence_score"],
+            created_at=e["created_at"]
+        )
+        for e in edges
+    ]
 
 
 @router.post("/graph/edges", response_model=GraphEdgeResponse, status_code=201)
@@ -101,10 +118,6 @@ async def create_edge(
 ):
     """
     Create a directed edge between two existing graph nodes.
-
-    relation_type must be one of:
-      BELONGS_TO | DEPENDS_ON | USES_SKILL | FOREIGN_KEY_OF |
-      AFFECTS_KPI | GENERATED_BY | TRANSFORMS_INTO | MUTATES_VIA | PROTECTED_BY
     """
     try:
         edge = await graph_service.get_or_create_edge(
@@ -114,7 +127,14 @@ async def create_edge(
             relation_type=req.relation_type,
             confidence_score=req.confidence_score,
         )
-        return GraphEdgeResponse.model_validate(edge)
+        return GraphEdgeResponse(
+            id=edge["id"],
+            source_node_id=edge["source_node_id"],
+            target_node_id=edge["target_node_id"],
+            relation_type=edge["relation_type"],
+            confidence_score=edge["confidence_score"],
+            created_at=edge["created_at"]
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -126,16 +146,11 @@ async def create_edge(
 @router.get("/graph/neighbors/{node_id}", response_model=NeighborsResponse)
 async def get_neighbors(
     node_id: int,
-    direction: str = "both",   # "out" | "in" | "both"
+    direction: str = "both",
     db: AsyncSession = Depends(get_db),
 ):
     """
     Return every node one hop away from node_id.
-
-    direction:
-      - "out"  → only edges where this node is the source
-      - "in"   → only edges where this node is the target
-      - "both" → union (default)
     """
     if direction not in ("out", "in", "both"):
         raise HTTPException(
@@ -150,18 +165,30 @@ async def get_neighbors(
         neighbors.append(
             NeighborDetail(
                 direction="outbound",
-                relation_type=item["edge"].relation_type,
-                confidence_score=item["edge"].confidence_score,
-                node=GraphNodeResponse.model_validate(item["node"]),
+                relation_type=item["edge"]["relation_type"],
+                confidence_score=item["edge"]["confidence_score"],
+                node=GraphNodeResponse(
+                    id=item["node"]["id"],
+                    node_type=item["node"]["node_type"],
+                    entity_id=item["node"]["entity_id"],
+                    entity_name=item["node"]["entity_name"],
+                    metadata=item["node"]["node_metadata"]
+                )
             )
         )
     for item in result.get("inbound", []):
         neighbors.append(
             NeighborDetail(
                 direction="inbound",
-                relation_type=item["edge"].relation_type,
-                confidence_score=item["edge"].confidence_score,
-                node=GraphNodeResponse.model_validate(item["node"]),
+                relation_type=item["edge"]["relation_type"],
+                confidence_score=item["edge"]["confidence_score"],
+                node=GraphNodeResponse(
+                    id=item["node"]["id"],
+                    node_type=item["node"]["node_type"],
+                    entity_id=item["node"]["entity_id"],
+                    entity_name=item["node"]["entity_name"],
+                    metadata=item["node"]["node_metadata"]
+                )
             )
         )
 
@@ -176,15 +203,32 @@ async def get_entity_lineage(
 ):
     """
     BFS traversal from any node matching the entity name or id.
-    Returns all reachable nodes and edges within max_depth hops.
-    Edges are deduplicated (bug fix over the original draft).
     """
     result = await graph_service.get_lineage(
         db, entity_name=entity, max_depth=max_depth
     )
     return LineageGraphResponse(
-        nodes=[GraphNodeResponse.model_validate(n) for n in result["nodes"]],
-        edges=[GraphEdgeResponse.model_validate(e) for e in result["edges"]],
+        nodes=[
+            GraphNodeResponse(
+                id=n["id"],
+                node_type=n["node_type"],
+                entity_id=n["entity_id"],
+                entity_name=n["entity_name"],
+                metadata=n["node_metadata"]
+            )
+            for n in result["nodes"]
+        ],
+        edges=[
+            GraphEdgeResponse(
+                id=e["id"],
+                source_node_id=e["source_node_id"],
+                target_node_id=e["target_node_id"],
+                relation_type=e["relation_type"],
+                confidence_score=e["confidence_score"],
+                created_at=e["created_at"]
+            )
+            for e in result["edges"]
+        ],
     )
 
 
@@ -195,18 +239,7 @@ async def get_impact_analysis(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Reverse BFS impact analysis.
-
-    Given an entity name, returns all nodes that *depend on* it
-    — directly or transitively — up to max_depth hops away.
-
-    Example:
-      GET /api/graph/impact/customers
-      → Returns: orders_clean (DEPENDS_ON, depth 1),
-                 monthly_revenue (AFFECTS_KPI, depth 2), ...
-
-    This answers the question:
-      "If I change the 'customers' table, what else might break?"
+    Reverse BFS impact analysis in Neo4j.
     """
     result = await graph_service.get_impact_analysis(
         db, entity_name=entity, max_depth=max_depth
@@ -214,7 +247,13 @@ async def get_impact_analysis(
 
     impacted = [
         ImpactedNode(
-            node=GraphNodeResponse.model_validate(item["node"]),
+            node=GraphNodeResponse(
+                id=item["node"]["id"],
+                node_type=item["node"]["node_type"],
+                entity_id=item["node"]["entity_id"],
+                entity_name=item["node"]["entity_name"],
+                metadata=item["node"]["node_metadata"]
+            ),
             depth=item["depth"],
             relation_type=item["relation_type"],
             path=item["path"],
@@ -225,8 +264,53 @@ async def get_impact_analysis(
     return ImpactAnalysisResponse(
         entity=entity,
         start_nodes=[
-            GraphNodeResponse.model_validate(n) for n in result["start_nodes"]
+            GraphNodeResponse(
+                id=n["id"],
+                node_type=n["node_type"],
+                entity_id=n["entity_id"],
+                entity_name=n["entity_name"],
+                metadata=n["node_metadata"]
+            )
+            for n in result["start_nodes"]
         ],
         impacted_nodes=impacted,
         total_impacted=result["total_impacted"],
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Catalog Synchronization & Auditing Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/graph/sync", status_code=200)
+async def sync_metadata_catalog(db: AsyncSession = Depends(get_db)):
+    """
+    Sync knowledge graph from the default warehouse connector.
+    Org path: register connector → POST /connectors/{id}/sync-graph.
+    """
+    try:
+        from app.services import connector_introspection_service
+        from app.connectors.db_factory import factory
+        if "warehouse" in factory.connections:
+            result = await connector_introspection_service.sync_connection_to_graph("warehouse")
+            return {"status": "success", "message": "Knowledge graph synced from warehouse connector.", **result}
+        from app.services import graph_knowledge_service
+        await graph_knowledge_service.seed_demo_knowledge()
+        return {"status": "success", "message": "Demo knowledge graph seeded (no connector registered)."}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Synchronization failed: {str(exc)}")
+
+
+@router.get("/graph/audit/{entity_id}")
+async def get_node_audit_history(
+    entity_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve audit history from PostgreSQL for a given Neo4j node entity_id.
+    """
+    try:
+        history = await graph_service.get_audit_history_for_node(entity_id, db)
+        return history
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

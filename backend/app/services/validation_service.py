@@ -1,5 +1,39 @@
-import magic
+"""
+validation_service.py
+─────────────────────
+Purpose:
+    Implements AST checks and file metadata verification.
+
+Use Cases:
+    - Validates file magic bytes and size limits.
+    - Runs syntax checks and blocks unsafe statements (imports, sys, eval, subprocess) 
+      in generated Python scripts.
+"""
+
 import ast
+
+# python-magic requires libmagic.dll on Windows.
+# Install fix:  pip install python-magic-bin
+# Fallback: pure-Python header inspection so the server still boots without the DLL.
+try:
+    import magic as _magic
+
+    def _detect_mime(data: bytes) -> str:
+        return _magic.from_buffer(data, mime=True)
+
+except (ImportError, OSError):
+    def _detect_mime(data: bytes) -> str:  # type: ignore[misc]
+        """Minimal MIME detection without libmagic — covers CSV and JSON only."""
+        head = data.lstrip()
+        # JSON starts with { or [
+        if head and head[0:1] in (b"{", b"["):
+            return "application/json"
+        # Try to decode as text — if it succeeds it's a CSV/text file
+        try:
+            data.decode("utf-8")
+            return "text/plain"
+        except UnicodeDecodeError:
+            return "application/octet-stream"
 
 FORBIDDEN_METHODS = {
     "quantile",
@@ -40,7 +74,7 @@ def validate_magic_bytes(file_bytes: bytes, declared_extension: str) -> tuple[bo
     if len(file_bytes) > 50 * 1024 * 1024:
         return False, "File is too large (max 50MB)"
         
-    detected = magic.from_buffer(file_bytes, mime=True)
+    detected = _detect_mime(file_bytes)
     ext = declared_extension.lower()
     if ext == '.csv':
         if detected not in ['text/plain', 'text/csv', 'application/csv']:

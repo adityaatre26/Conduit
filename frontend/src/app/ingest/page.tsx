@@ -51,6 +51,9 @@ export default function IngestPage() {
   const [file, setFile] = useState<File | null>(null);
   const [targetTable, setTargetTable] = useState("orders_clean");
   const [descriptionMd, setDescriptionMd] = useState("");
+  const [extraParams, setExtraParams] = useState<Array<{ key: string; value: string }>>([
+    { key: "", value: "" },
+  ]);
   const [dragging, setDragging] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [stepIndex, setStepIndex] = useState(0);
@@ -127,6 +130,7 @@ export default function IngestPage() {
     setManualMode(false);
     setIsAnalyzing(false);
     setDescriptionMd("");
+    setExtraParams([{ key: "", value: "" }]);
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -158,7 +162,13 @@ export default function IngestPage() {
     }
 
     try {
-      const p = await ingestFile(file, targetTable, descriptionMd);
+      const extraParamsObj: Record<string, string> = {};
+      extraParams.forEach((param) => {
+        if (param.key.trim()) {
+          extraParamsObj[param.key.trim()] = param.value;
+        }
+      });
+      const p = await ingestFile(file, targetTable, descriptionMd, extraParamsObj);
       clearTimers();
       setStepStatus((prev) => {
         const next = [...prev];
@@ -278,6 +288,65 @@ export default function IngestPage() {
                     This context helps the AI understand the business purpose of the dataset and perform better transformations.
                   </p>
                 </div>
+
+                <div>
+                  <label className="label">Extra Parameters</label>
+                  <p className="text-2xs text-fg-muted mb-2">
+                    Add custom key-value pairs (e.g. source_system, batch_id, environment) to attach to the ingested dataset.
+                  </p>
+                  <div className="space-y-2">
+                    {extraParams.map((param, index) => (
+                      <div key={index} className="flex gap-2 items-center">
+                        <input
+                          type="text"
+                          placeholder="Key (e.g., source_system)"
+                          value={param.key}
+                          onChange={(e) => {
+                            const updated = [...extraParams];
+                            updated[index].key = e.target.value;
+                            setExtraParams(updated);
+                          }}
+                          className="input font-mono text-xs flex-1"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Value (e.g., sap_erp)"
+                          value={param.value}
+                          onChange={(e) => {
+                            const updated = [...extraParams];
+                            updated[index].value = e.target.value;
+                            setExtraParams(updated);
+                          }}
+                          className="input font-mono text-xs flex-1"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = extraParams.filter((_, i) => i !== index);
+                            setExtraParams(updated.length > 0 ? updated : [{ key: "", value: "" }]);
+                          }}
+                          className="btn-danger h-9 px-2.5 flex items-center justify-center flex-shrink-0"
+                          title="Remove Parameter"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setExtraParams([...extraParams, { key: "", value: "" }])}
+                      className="btn-secondary text-xs h-8 px-3.5 flex items-center gap-1 mt-1"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                      </svg>
+                      Add Parameter
+                    </button>
+                  </div>
+                </div>
+
                 {dataUnderstanding && (
                   <div className="rounded-md bg-bg-subtle border border-border p-3">
                     <div className="text-2xs font-semibold uppercase tracking-wider text-fg-muted mb-1 flex items-center gap-1.5">

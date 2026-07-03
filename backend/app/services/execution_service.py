@@ -1,9 +1,20 @@
+"""
+execution_service.py
+────────────────────
+Purpose:
+    Executes generated data transformation Python scripts.
+
+Use Cases:
+    - Runs python code in a restricted/sandboxed namespace.
+    - Inserts valid rows into PostgreSQL and isolates failures in quarantine tables.
+"""
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text, select
+from sqlalchemy import text
 import pandas as pd
 from datetime import datetime
 from fastapi import HTTPException
-from app.models import Proposal, PipelineSkillsLedger, QuarantineRecord, TableMetadata
+from app.models import Proposal, PipelineSkillsLedger, QuarantineRecord
 from app.schemas import ExecutionResult, InsightItem
 
 # NEW — lineage hook (additive, never raises)
@@ -36,7 +47,9 @@ async def execute_proposal(
 
     filepath = file_path
     try:
-        df = pd.read_csv(filepath)
+        import os as _os
+        _ext = _os.path.splitext(filepath or "")[-1].lower()
+        df = pd.read_json(filepath) if _ext == ".json" else pd.read_csv(filepath)
     except Exception as e:
         proposal.status = "FAILED"
         await db.commit()
@@ -46,24 +59,23 @@ async def execute_proposal(
         raise e
 
     import hashlib
-    namespace = {"pd": pd, "df": df, "hashlib": hashlib}
+    import numpy as np
+    namespace = {"pd": pd, "df": df, "hashlib": hashlib, "np": np}
     try:
         exec(generated_code, namespace)
         transform_fn = namespace["transform"]
         transformed_df = transform_fn(df)
     except TypeError as e:
         proposal.status = "FAILED"
-        stmt = select(TableMetadata).where(TableMetadata.table_name == target_table)
-        res = await db.execute(stmt)
-        tbl = res.scalars().first()
         ledger_entry = PipelineSkillsLedger(
-            table_id=tbl.id if tbl else None,
+            table_id=None,
             proposal_id=proposal_id,
             skill_name=f"transform_{filename}",
             applied_by_llm_version=llm_model_used,
             transformation_script_ref=generated_code,
             human_approver_id=approver_id,
-            execution_status="FAILED"
+            execution_status="FAILED",
+            graph_node_id=f"tbl-{target_table}"
         )
         db.add(ledger_entry)
         await db.commit()
@@ -83,17 +95,15 @@ async def execute_proposal(
         )
     except KeyError as e:
         proposal.status = "FAILED"
-        stmt = select(TableMetadata).where(TableMetadata.table_name == target_table)
-        res = await db.execute(stmt)
-        tbl = res.scalars().first()
         ledger_entry = PipelineSkillsLedger(
-            table_id=tbl.id if tbl else None,
+            table_id=None,
             proposal_id=proposal_id,
             skill_name=f"transform_{filename}",
             applied_by_llm_version=llm_model_used,
             transformation_script_ref=generated_code,
             human_approver_id=approver_id,
-            execution_status="FAILED"
+            execution_status="FAILED",
+            graph_node_id=f"tbl-{target_table}"
         )
         db.add(ledger_entry)
         await db.commit()
@@ -109,17 +119,15 @@ async def execute_proposal(
         )
     except Exception as e:
         proposal.status = "FAILED"
-        stmt = select(TableMetadata).where(TableMetadata.table_name == target_table)
-        res = await db.execute(stmt)
-        tbl = res.scalars().first()
         ledger_entry = PipelineSkillsLedger(
-            table_id=tbl.id if tbl else None,
+            table_id=None,
             proposal_id=proposal_id,
             skill_name=f"transform_{filename}",
             applied_by_llm_version=llm_model_used,
             transformation_script_ref=generated_code,
             human_approver_id=approver_id,
-            execution_status="FAILED"
+            execution_status="FAILED",
+            graph_node_id=f"tbl-{target_table}"
         )
         db.add(ledger_entry)
         await db.commit()
@@ -134,11 +142,7 @@ async def execute_proposal(
             )
         )
 
-    # Insert into database
-    stmt = select(TableMetadata).where(TableMetadata.table_name == target_table)
-    res = await db.execute(stmt)
-    tbl = res.scalars().first()
-
+    # Insert into warehouse database (live data — separate from audit PG role)
     rows_written = 0
     rows_quarantined = 0
     start_time = datetime.now()
@@ -173,13 +177,14 @@ async def execute_proposal(
     try:
         ledger_status = "SUCCESS" if rows_written > 0 else "FAILED"
         ledger_entry = PipelineSkillsLedger(
-            table_id=tbl.id if tbl else None,
+            table_id=None,
             proposal_id=proposal_id,
             skill_name=f"transform_{filename}",
             applied_by_llm_version=llm_model_used,
             transformation_script_ref=generated_code,
             human_approver_id=approver_id,
-            execution_status=ledger_status
+            execution_status=ledger_status,
+            graph_node_id=f"tbl-{target_table}"
         )
         db.add(ledger_entry)
         proposal.status = "EXECUTED"
@@ -188,13 +193,14 @@ async def execute_proposal(
         await db.rollback()
         proposal.status = "FAILED"
         db.add(PipelineSkillsLedger(
-            table_id=tbl.id if tbl else None,
+            table_id=None,
             proposal_id=proposal_id,
             skill_name=f"transform_{filename}",
             applied_by_llm_version=llm_model_used,
             transformation_script_ref=generated_code,
             human_approver_id=approver_id,
-            execution_status="ROLLEDBACK"
+            execution_status="ROLLEDBACK",
+            graph_node_id=f"tbl-{target_table}"
         ))
         await db.commit()
         # After a failure, reset the proposal so it can be retried

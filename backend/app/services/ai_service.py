@@ -1,5 +1,17 @@
+"""
+ai_service.py
+─────────────
+Purpose:
+    Handles LLM query orchestration and prompt generation via Groq API.
+
+Use Cases:
+    - Generates transformation python scripts for incoming files based on target schema.
+    - Orchestrates schema drift detection and provides reasoning.
+"""
+
 import json
 import asyncio
+import re
 from groq import Groq
 from app.core.config import settings
 import traceback
@@ -7,6 +19,16 @@ from typing import Optional
 
 client = Groq(api_key=settings.GROQ_API_KEY)
 MODEL = "llama-3.3-70b-versatile"
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences (```json ... ``` or ``` ... ```) from LLM output."""
+    stripped = text.strip()
+    # Match ```json ... ``` or ```JSON ... ``` or ``` ... ```
+    m = re.match(r"^```(?:json|JSON)?\s*\n?(.*?)```\s*$", stripped, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return stripped
 
 async def generate_pipeline_proposal(
     incoming_schema: dict,
@@ -101,7 +123,7 @@ The function signature MUST be: def transform(df: pd.DataFrame) -> pd.DataFrame
 Rules for generated_code (ENRICHMENT):
 - If numeric columns exist, add an `amount_tier` derived column classifying values as 'low' (< 25th pct), 'medium', and 'high' (> 75th pct).
 - Flag potential duplicate rows by adding a `is_potential_duplicate` boolean column (True if all non-ID columns match another row).
-- Flag numeric outliers by adding `{col}_outlier` boolean columns (e.g. `amount_outlier` or `amount_usd_outlier`) for values beyond 1.5× IQR.
+- Flag numeric outliers by adding `amount_outlier` boolean column for values beyond 1.5× IQR (matching the target database schema).
 - Record any applied enrichment rules in the `enrichment_applied` field (e.g., ["amount_tier", "outlier_detection", "duplicate_flagging"]).
 
 Rules for suggested_skills_to_add:
@@ -164,17 +186,25 @@ Analyze the drift and generate the transformation plan."""
     if settings.MOCK_AI:
         # Check incoming schema to determine test case
         cols = list(incoming_schema.keys())
-        if "amount_usd" in cols and "customer_email" not in cols:
-            # CONFLICT mock
+        if "amount_usd" not in cols:
+            # SCHEMA_EVOLUTION mock
             generated_code = (
                 "def transform(df: pd.DataFrame) -> pd.DataFrame:\n"
-                "    # Attempt basic enrichment\n"
+                "    import hashlib\n"
+                "    df = df.rename(columns={\"order_amount\": \"amount_usd\"})\n"
+                "    if \"discount_code\" in df.columns:\n"
+                "        df = df.drop(columns=[\"discount_code\"])\n"
+                "    df[\"order_status\"] = df[\"order_status\"].fillna(\"completed\")\n"
+                "    df[\"customer_email\"] = df[\"customer_email\"].apply(lambda x: hashlib.sha256(str(x).encode()).hexdigest())\n"
+                "    df[\"amount_usd\"] = df[\"amount_usd\"].astype(str).str.replace(r'[^\\d\\.]', '', regex=True)\n"
                 "    df[\"amount_usd\"] = pd.to_numeric(df[\"amount_usd\"], errors='coerce')\n"
-                "    q25 = float(df[\"amount_usd\"].quantile(0.25))\n"
-                "    q75 = float(df[\"amount_usd\"].quantile(0.75))\n"
+                "    _sv = df[\"amount_usd\"].dropna().sort_values().reset_index(drop=True)\n"
+                "    _n = len(_sv)\n"
+                "    q25 = float(_sv.iloc[int(_n * 0.25)]) if _n > 0 else 0.0\n"
+                "    q75 = float(_sv.iloc[int(_n * 0.75)]) if _n > 0 else 0.0\n"
                 "    df[\"amount_tier\"] = pd.cut(df[\"amount_usd\"], bins=[-float('inf'), q25, q75, float('inf')], labels=[\"low\", \"medium\", \"high\"]).astype(str)\n"
                 "    iqr = float(q75 - q25)\n"
-                "    df[\"amount_outlier\"] = (df[\"amount_usd\"] < q25 - 1.5 * iqr) | (df[\"amount_usd\"] > q75 + 1.5 * iqr)\n"
+                "    df[\"amount_outlier\"] = (df[\"amount_usd\"] < (q25 - 1.5 * iqr)) | (df[\"amount_usd\"] > (q75 + 1.5 * iqr))\n"
                 "    dup_cols = [c for c in df.columns if c != \"order_id\" and c not in [\"processed_at\", \"amount_tier\", \"amount_outlier\"]]\n"
                 "    df[\"is_potential_duplicate\"] = df.duplicated(subset=dup_cols, keep=False)\n"
                 "    df[\"processed_at\"] = pd.Timestamp.now()\n"
@@ -203,16 +233,18 @@ Analyze the drift and generate the transformation plan."""
                 "enrichment_applied": ["amount_tier", "outlier_detection", "duplicate_flagging"],
                 "context_aware": context_bundle is not None,
             })
-        elif "amount_usd" in cols and "customer_email" not in cols:
+        elif "customer_email" not in cols:
             # CONFLICT mock
             generated_code = (
                 "def transform(df: pd.DataFrame) -> pd.DataFrame:\n"
                 "    # Attempt basic enrichment\n"
                 "    df[\"amount_usd\"] = pd.to_numeric(df[\"amount_usd\"], errors='coerce')\n"
-                "    q25 = df[\"amount_usd\"].quantile(0.25)\n"
-                "    q75 = df[\"amount_usd\"].quantile(0.75)\n"
+                "    _sv = df[\"amount_usd\"].dropna().sort_values().reset_index(drop=True)\n"
+                "    _n = len(_sv)\n"
+                "    q25 = float(_sv.iloc[int(_n * 0.25)]) if _n > 0 else 0.0\n"
+                "    q75 = float(_sv.iloc[int(_n * 0.75)]) if _n > 0 else 0.0\n"
                 "    df[\"amount_tier\"] = pd.cut(df[\"amount_usd\"], bins=[-float('inf'), q25, q75, float('inf')], labels=[\"low\", \"medium\", \"high\"]).astype(str)\n"
-                "    iqr = q75 - q25\n"
+                "    iqr = float(q75 - q25)\n"
                 "    df[\"amount_outlier\"] = (df[\"amount_usd\"] < (q25 - 1.5 * iqr)) | (df[\"amount_usd\"] > (q75 + 1.5 * iqr))\n"
                 "    dup_cols = [c for c in df.columns if c != \"order_id\" and c not in [\"processed_at\", \"amount_tier\", \"amount_outlier\"]]\n"
                 "    df[\"is_potential_duplicate\"] = df.duplicated(subset=dup_cols, keep=False)\n"
@@ -240,10 +272,12 @@ Analyze the drift and generate the transformation plan."""
             generated_code = (
                 "def transform(df: pd.DataFrame) -> pd.DataFrame:\n"
                 "    import hashlib\n"
-                "    df[\"customer_email\"] = df[\"customer_email\"].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())\n"
+                "    df[\"customer_email\"] = df[\"customer_email\"].apply(lambda x: hashlib.sha256(str(x).encode()).hexdigest())\n"
                 "    df[\"amount_usd\"] = df[\"amount_usd\"].astype(float)\n"
-                "    q25 = float(df[\"amount_usd\"].quantile(0.25))\n"
-                "    q75 = float(df[\"amount_usd\"].quantile(0.75))\n"
+                "    _sv = df[\"amount_usd\"].dropna().sort_values().reset_index(drop=True)\n"
+                "    _n = len(_sv)\n"
+                "    q25 = float(_sv.iloc[int(_n * 0.25)]) if _n > 0 else 0.0\n"
+                "    q75 = float(_sv.iloc[int(_n * 0.75)]) if _n > 0 else 0.0\n"
                 "    df[\"amount_tier\"] = pd.cut(df[\"amount_usd\"], bins=[-float('inf'), q25, q75, float('inf')], labels=[\"low\", \"medium\", \"high\"]).astype(str)\n"
                 "    iqr = float(q75 - q25)\n"
                 "    df[\"amount_outlier\"] = (df[\"amount_usd\"] < (q25 - 1.5 * iqr)) | (df[\"amount_usd\"] > (q75 + 1.5 * iqr))\n"
@@ -289,6 +323,7 @@ Analyze the drift and generate the transformation plan."""
                     raise e
 
     try:
+        content = _strip_code_fences(content)
         parsed = json.loads(content)
         return {
             "raw_response": content,
@@ -323,7 +358,7 @@ async def generate_skill_script(skill_name: str, description: str, category: str
     for col in columns:
         if col in df.columns:
             # Strip currency symbols and commas, then convert to numeric
-            df[col] = df[col].astype(str).str.replace(r'[^\\d\\.]', '', regex=True)
+            df[col] = df[col].astype(str).str.replace(r'[^\d\.]', '', regex=True)
             df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
 '''
@@ -381,5 +416,4 @@ async def generate_skill_script(skill_name: str, description: str, category: str
             pass
     return df
 '''
-
 

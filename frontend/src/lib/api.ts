@@ -17,354 +17,246 @@ import type {
   RejectRequest,
   SkillDetailResponse,
   SkillResponse,
-  WarehouseUnitResponse,
   SuggestTargetResponse,
   InsightItem,
+  ConnectorProvider,
+  ConnectorConnection,
+  RegisterConnectorRequest,
 } from "./types";
 
-const API_BASE = "/api";
+/* ─── Helpers ──────────────────────────────────────────────── */
 
-async function handle<T>(res: Response): Promise<T> {
+const NEXT_PUBLIC_API_URL =
+  (typeof window !== "undefined" ? (window as any).NEXT_PUBLIC_API_URL : null) ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "";
+
+async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
+  const url = `${NEXT_PUBLIC_API_URL}${path}`;
+  const res = await fetch(url, options);
   if (!res.ok) {
-    let detail: unknown;
-    const clone = res.clone();
+    let errText = "";
     try {
-      detail = await res.json();
-    } catch {
-      try {
-        detail = await clone.text();
-      } catch {
-        detail = "Could not parse error response body";
+      const data = await res.json();
+      const detail = data.detail;
+      if (typeof detail === "string") {
+        errText = detail;
+      } else if (detail && typeof detail === "object") {
+        errText = (detail as any).detail ?? JSON.stringify(detail);
+      } else {
+        errText = JSON.stringify(data);
       }
+    } catch {
+      try { errText = await res.text(); } catch {}
     }
-    const err = new Error(
-      `API ${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`,
-    );
-    (err as Error & { status?: number; detail?: unknown }).status = res.status;
-    (err as Error & { status?: number; detail?: unknown }).detail = detail;
-    throw err;
+    throw new Error(errText || `API request failed (status ${res.status})`);
   }
   return res.json() as Promise<T>;
 }
 
-/* ─── Core ingest / proposals / execution ─────────────────── */
+/* ─── Ingest / Proposals / Execution ──────────────────────── */
 
-export async function ingestFile(
-  file: File,
-  targetTable: string,
-  descriptionMd?: string,
-): Promise<ProposalResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  form.append("target_table", targetTable);
-  if (descriptionMd) {
-    form.append("description_md", descriptionMd);
-  }
-  const res = await fetch(`${API_BASE}/ingest`, {
-    method: "POST",
-    body: form,
-  });
-  return handle<ProposalResponse>(res);
+export async function ingestFile(file: File, targetTable: string, descriptionMd?: string): Promise<ProposalResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("target_table", targetTable);
+  if (descriptionMd) formData.append("description_md", descriptionMd);
+  return apiRequest<ProposalResponse>("/api/ingest", { method: "POST", body: formData });
 }
 
-
-export async function suggestTargetTable(
-  file: File,
-): Promise<SuggestTargetResponse> {
-  const form = new FormData();
-  form.append("file", file);
-  const res = await fetch(`${API_BASE}/suggest-target`, {
-    method: "POST",
-    body: form,
-  });
-  return handle<SuggestTargetResponse>(res);
+export async function suggestTargetTable(file: File): Promise<SuggestTargetResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+  return apiRequest<SuggestTargetResponse>("/api/suggest-target", { method: "POST", body: formData });
 }
 
-export async function listProposals(params?: {
-  limit?: number;
-  offset?: number;
-  status?: string;
-}): Promise<ProposalResponse[]> {
+export async function listProposals(params?: { limit?: number; offset?: number; status?: string }): Promise<ProposalResponse[]> {
   const q = new URLSearchParams();
-  if (params?.limit !== undefined) q.set("limit", String(params.limit));
-  if (params?.offset !== undefined) q.set("offset", String(params.offset));
-  if (params?.status) q.set("status", params.status);
+  if (params?.limit !== undefined) q.append("limit", String(params.limit));
+  if (params?.offset !== undefined) q.append("offset", String(params.offset));
+  if (params?.status && params.status !== "ALL") q.append("status", params.status);
   const qs = q.toString();
-  return handle<ProposalResponse[]>(
-    await fetch(`${API_BASE}/proposals${qs ? `?${qs}` : ""}`),
-  );
+  return apiRequest<ProposalResponse[]>(`/api/proposals${qs ? "?" + qs : ""}`);
 }
 
 export async function getProposal(id: string): Promise<ProposalResponse> {
-  return handle<ProposalResponse>(
-    await fetch(`${API_BASE}/proposals/${id}`),
-  );
+  return apiRequest<ProposalResponse>(`/api/proposals/${id}`);
 }
 
-export async function getProposalContext(
-  id: string,
-): Promise<ProposalContextResponse> {
-  return handle<ProposalContextResponse>(
-    await fetch(`${API_BASE}/proposals/${id}/context`),
-  );
+export async function getProposalContext(id: string): Promise<ProposalContextResponse> {
+  return apiRequest<ProposalContextResponse>(`/api/proposals/${id}/context`);
 }
 
-export async function approveProposal(
-  id: string,
-  body: ApproveRequest,
-): Promise<ExecutionResult> {
-  return handle<ExecutionResult>(
-    await fetch(`${API_BASE}/proposals/${id}/approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+export async function approveProposal(id: string, body: ApproveRequest): Promise<ExecutionResult> {
+  return apiRequest<ExecutionResult>(`/api/proposals/${id}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
-export async function rejectProposal(
-  id: string,
-  body: RejectRequest,
-): Promise<{ status: string }> {
-  return handle<{ status: string }>(
-    await fetch(`${API_BASE}/proposals/${id}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+export async function rejectProposal(id: string, body: RejectRequest): Promise<{ status: string }> {
+  return apiRequest<{ status: string }>(`/api/proposals/${id}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
-/* ─── Audit / Quarantine / Sources ─────────────────────────── */
+/* ─── Audit / Quarantine ────────────────────────────────────── */
 
-export async function listAudit(
-  limit = 50,
-  offset = 0,
-): Promise<AuditEntry[]> {
-  return handle<AuditEntry[]>(
-    await fetch(`${API_BASE}/audit?limit=${limit}&offset=${offset}`),
-  );
+export async function listAudit(limit = 50, offset = 0): Promise<AuditEntry[]> {
+  return apiRequest<AuditEntry[]>(`/api/audit?limit=${limit}&offset=${offset}`);
 }
 
-export async function listAuditForProposal(
-  proposalId: string,
-): Promise<AuditEntry[]> {
-  return handle<AuditEntry[]>(
-    await fetch(
-      `${API_BASE}/audit?proposal_id=${encodeURIComponent(proposalId)}`,
-    ),
-  );
+export async function listAuditForProposal(proposalId: string): Promise<AuditEntry[]> {
+  return apiRequest<AuditEntry[]>(`/api/audit?proposal_id=${proposalId}`);
 }
 
 export async function getAuditEntry(id: number): Promise<AuditEntry> {
-  return handle<AuditEntry>(await fetch(`${API_BASE}/audit/${id}`));
+  return apiRequest<AuditEntry>(`/api/audit/${id}`);
 }
 
 export async function listQuarantine(): Promise<QuarantineEntry[]> {
-  return handle<QuarantineEntry[]>(
-    await fetch(`${API_BASE}/quarantine`),
-  );
+  return apiRequest<QuarantineEntry[]>("/api/quarantine");
 }
 
-export async function getQuarantineForProposal(
-  proposalId: string,
-): Promise<QuarantineEntry[]> {
-  return handle<QuarantineEntry[]>(
-    await fetch(`${API_BASE}/quarantine/${proposalId}`),
-  );
+export async function getQuarantineForProposal(proposalId: string): Promise<QuarantineEntry[]> {
+  return apiRequest<QuarantineEntry[]>(`/api/quarantine/${proposalId}`);
 }
 
-export async function listSources(): Promise<WarehouseUnitResponse[]> {
-  return handle<WarehouseUnitResponse[]>(await fetch(`${API_BASE}/sources`));
+/* ─── Connectors ────────────────────────────────────────────── */
+
+export async function listProviders(): Promise<ConnectorProvider[]> {
+  const data = await apiRequest<{ providers: ConnectorProvider[] }>("/api/connectors/providers");
+  return data.providers;
+}
+
+export async function listConnections(): Promise<ConnectorConnection[]> {
+  return apiRequest<ConnectorConnection[]>("/api/connectors");
+}
+
+export async function registerConnector(body: RegisterConnectorRequest): Promise<{ status: string; conn_id: string; latency_ms: number }> {
+  return apiRequest("/api/connectors/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function disconnectConnector(connId: string): Promise<{ status: string }> {
+  return apiRequest(`/api/connectors/${connId}`, { method: "DELETE" });
+}
+
+export async function syncConnectorGraph(connId: string, tableNames?: string): Promise<{ status: string }> {
+  const qs = tableNames ? `?table_names=${encodeURIComponent(tableNames)}` : "";
+  return apiRequest(`/api/connectors/${connId}/sync-graph${qs}`, { method: "POST" });
 }
 
 /* ─── Skills ───────────────────────────────────────────────── */
 
-export async function listSkills(params?: {
-  category?: string;
-  status?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<SkillResponse[]> {
+export async function listSkills(params?: { category?: string; status?: string; limit?: number; offset?: number }): Promise<SkillResponse[]> {
   const q = new URLSearchParams();
-  if (params?.category) q.set("category", params.category);
-  if (params?.status) q.set("status", params.status);
-  if (params?.limit !== undefined) q.set("limit", String(params.limit));
-  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  if (params?.limit !== undefined) q.append("limit", String(params.limit));
+  if (params?.offset !== undefined) q.append("offset", String(params.offset));
+  if (params?.category && params.category !== "ALL") q.append("category", params.category);
+  if (params?.status && params.status !== "ALL") q.append("status", params.status);
   const qs = q.toString();
-  return handle<SkillResponse[]>(
-    await fetch(`${API_BASE}/skills${qs ? `?${qs}` : ""}`),
-  );
+  return apiRequest<SkillResponse[]>(`/api/skills${qs ? "?" + qs : ""}`);
 }
 
 export async function searchSkills(q: string): Promise<SkillResponse[]> {
-  return handle<SkillResponse[]>(
-    await fetch(`${API_BASE}/skills/search?q=${encodeURIComponent(q)}`),
-  );
+  return apiRequest<SkillResponse[]>(`/api/skills/search?q=${encodeURIComponent(q)}`);
 }
 
 export async function getSkill(id: number): Promise<SkillDetailResponse> {
-  return handle<SkillDetailResponse>(
-    await fetch(`${API_BASE}/skills/${id}`),
-  );
+  return apiRequest<SkillDetailResponse>(`/api/skills/${id}`);
 }
 
-export async function createSkill(
-  body: CreateSkillRequest,
-): Promise<SkillResponse> {
-  return handle<SkillResponse>(
-    await fetch(`${API_BASE}/skills`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+export async function createSkill(body: CreateSkillRequest): Promise<SkillResponse> {
+  return apiRequest<SkillResponse>("/api/skills", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 /* ─── Graph ────────────────────────────────────────────────── */
 
-export async function listGraphNodes(params?: {
-  node_type?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<GraphNodeResponse[]> {
+export async function listGraphNodes(params?: { node_type?: string; limit?: number; offset?: number }): Promise<GraphNodeResponse[]> {
   const q = new URLSearchParams();
-  if (params?.node_type) q.set("node_type", params.node_type);
-  if (params?.limit !== undefined) q.set("limit", String(params.limit));
-  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  if (params?.limit !== undefined) q.append("limit", String(params.limit));
+  if (params?.offset !== undefined) q.append("offset", String(params.offset));
+  if (params?.node_type) q.append("node_type", params.node_type);
   const qs = q.toString();
-  return handle<GraphNodeResponse[]>(
-    await fetch(`${API_BASE}/graph/nodes${qs ? `?${qs}` : ""}`),
-  );
+  return apiRequest<GraphNodeResponse[]>(`/api/graph/nodes${qs ? "?" + qs : ""}`);
 }
 
-export async function listGraphEdges(params?: {
-  relation_type?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<GraphEdgeResponse[]> {
+export async function listGraphEdges(params?: { relation_type?: string; limit?: number; offset?: number }): Promise<GraphEdgeResponse[]> {
   const q = new URLSearchParams();
-  if (params?.relation_type) q.set("relation_type", params.relation_type);
-  if (params?.limit !== undefined) q.set("limit", String(params.limit));
-  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  if (params?.limit !== undefined) q.append("limit", String(params.limit));
+  if (params?.offset !== undefined) q.append("offset", String(params.offset));
+  if (params?.relation_type) q.append("relation_type", params.relation_type);
   const qs = q.toString();
-  return handle<GraphEdgeResponse[]>(
-    await fetch(`${API_BASE}/graph/edges${qs ? `?${qs}` : ""}`),
-  );
+  return apiRequest<GraphEdgeResponse[]>(`/api/graph/edges${qs ? "?" + qs : ""}`);
 }
 
-export async function getGraphLineage(
-  entity: string,
-  maxDepth = 5,
-): Promise<LineageGraphResponse> {
-  return handle<LineageGraphResponse>(
-    await fetch(
-      `${API_BASE}/graph/lineage/${encodeURIComponent(entity)}?max_depth=${maxDepth}`,
-    ),
-  );
+export async function getGraphLineage(entity: string, maxDepth = 4): Promise<LineageGraphResponse> {
+  return apiRequest<LineageGraphResponse>(`/api/graph/lineage/${encodeURIComponent(entity)}?max_depth=${maxDepth}`);
 }
 
-export async function getGraphImpact(
-  entity: string,
-): Promise<ImpactAnalysisResponse> {
-  return handle<ImpactAnalysisResponse>(
-    await fetch(`${API_BASE}/graph/impact/${encodeURIComponent(entity)}`),
-  );
+export async function getGraphImpact(entity: string, maxDepth = 4): Promise<ImpactAnalysisResponse> {
+  return apiRequest<ImpactAnalysisResponse>(`/api/graph/impact/${encodeURIComponent(entity)}?max_depth=${maxDepth}`);
 }
 
-export async function getGraphNeighbors(
-  nodeId: number,
-): Promise<NeighborsResponse> {
-  return handle<NeighborsResponse>(
-    await fetch(`${API_BASE}/graph/neighbors/${nodeId}`),
-  );
+export async function getGraphNeighbors(nodeId: number): Promise<NeighborsResponse> {
+  return apiRequest<NeighborsResponse>(`/api/graph/neighbors/${nodeId}`);
 }
 
-export async function createGraphNode(
-  body: CreateGraphNodeRequest,
-): Promise<GraphNodeResponse> {
-  return handle<GraphNodeResponse>(
-    await fetch(`${API_BASE}/graph/nodes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+export async function createGraphNode(body: CreateGraphNodeRequest): Promise<GraphNodeResponse> {
+  return apiRequest<GraphNodeResponse>("/api/graph/nodes", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
 }
 
-export async function createGraphEdge(
-  body: CreateGraphEdgeRequest,
-): Promise<GraphEdgeResponse> {
-  return handle<GraphEdgeResponse>(
-    await fetch(`${API_BASE}/graph/edges`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
+export async function createGraphEdge(body: CreateGraphEdgeRequest): Promise<GraphEdgeResponse> {
+  return apiRequest<GraphEdgeResponse>("/api/graph/edges", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
 }
 
 /* ─── Lineage ──────────────────────────────────────────────── */
 
-export async function listLineage(params?: {
-  limit?: number;
-  offset?: number;
-}): Promise<LineageEventResponse[]> {
+export async function listLineage(params?: { limit?: number; offset?: number }): Promise<LineageEventResponse[]> {
   const q = new URLSearchParams();
-  if (params?.limit !== undefined) q.set("limit", String(params.limit));
-  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  if (params?.limit !== undefined) q.append("limit", String(params.limit));
+  if (params?.offset !== undefined) q.append("offset", String(params.offset));
   const qs = q.toString();
-  return handle<LineageEventResponse[]>(
-    await fetch(`${API_BASE}/lineage${qs ? `?${qs}` : ""}`),
-  );
+  return apiRequest<LineageEventResponse[]>(`/api/lineage${qs ? "?" + qs : ""}`);
 }
 
-export async function getLineageForProposal(
-  proposalId: string,
-): Promise<LineageEventResponse[]> {
-  return handle<LineageEventResponse[]>(
-    await fetch(`${API_BASE}/lineage/${proposalId}`),
-  );
+export async function getLineageForProposal(proposalId: string): Promise<LineageEventResponse[]> {
+  return apiRequest<LineageEventResponse[]>(`/api/lineage/${proposalId}`);
 }
 
 /* ─── Insights ─────────────────────────────────────────────── */
 
-export async function listInsights(params?: {
-  category?: string;
-  severity?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<InsightItem[]> {
+export async function listInsights(params?: { category?: string; severity?: string; limit?: number; offset?: number }): Promise<InsightItem[]> {
   const q = new URLSearchParams();
-  if (params?.category) q.set("category", params.category);
-  if (params?.severity) q.set("severity", params.severity);
-  if (params?.limit !== undefined) q.set("limit", String(params.limit));
-  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  if (params?.limit !== undefined) q.append("limit", String(params.limit));
+  if (params?.offset !== undefined) q.append("offset", String(params.offset));
+  if (params?.category) q.append("category", params.category);
+  if (params?.severity) q.append("severity", params.severity);
   const qs = q.toString();
-  return handle<InsightItem[]>(
-    await fetch(`${API_BASE}/insights${qs ? `?${qs}` : ""}`),
-  );
+  return apiRequest<InsightItem[]>(`/api/insights${qs ? "?" + qs : ""}`);
 }
 
-export async function getInsightsForProposal(
-  proposalId: string,
-): Promise<InsightItem[]> {
-  return handle<InsightItem[]>(
-    await fetch(`${API_BASE}/insights/${proposalId}`),
-  );
+export async function getInsightsForProposal(proposalId: string): Promise<InsightItem[]> {
+  return apiRequest<InsightItem[]>(`/api/insights/${proposalId}`);
 }
 
 export async function getInsightsSummary(): Promise<{
-  total: number;
-  by_category: Record<string, number>;
-  by_severity: Record<string, number>;
-  recent_critical: InsightItem[];
+  total: number; by_category: Record<string, number>; by_severity: Record<string, number>; recent_critical: InsightItem[];
 }> {
-  return handle<{
-    total: number;
-    by_category: Record<string, number>;
-    by_severity: Record<string, number>;
-    recent_critical: InsightItem[];
-  }>(await fetch(`${API_BASE}/insights/summary`));
+  return apiRequest("/api/insights/summary");
 }
-

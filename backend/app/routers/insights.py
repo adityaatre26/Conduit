@@ -1,3 +1,13 @@
+"""
+insights.py
+───────────
+Purpose:
+    FastAPI router defining endpoints for fetching data insights.
+
+Use Cases:
+    - GET /api/insights/{proposal_id}: Fetch structural anomalies, trends, and data quality insights.
+"""
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional

@@ -2,7 +2,7 @@
 
 > **An autonomous data engineering agent that turns messy supplier CSVs into clean warehouse tables — with a human in the loop for anything risky.**
 
-Conduit watches incoming data files, compares them to the target schema, and uses an LLM to generate a safe transformation script. The human engineer just reviews the diff and clicks approve. The agent handles the schema drift, the PII masking, the rename, the null fill, the missing column, the type cast — all of it.
+Conduit watches incoming data files, compares them to the target schema, and uses an LLM to generate a safe transformation script. The human engineer reviews the diff and clicks approve. The agent handles schema drift, PII masking, renames, null fills, missing columns, type casting — all of it.
 
 Built around a **gatekeeper-classifier** pattern: the LLM never gets the final say. Every proposal is checked against deterministic rules before execution.
 
@@ -16,7 +16,9 @@ conflicted_orders.csv   →  CONFLICT           (type mismatch, blocked)
 
 ## Table of contents
 
-- [Quick start](#quick-start)
+- [Running with Docker (Recommended)](#running-with-docker-recommended)
+- [Running without Docker (Natively)](#running-without-docker-natively)
+- [Local testing & Verification](#local-testing--verification)
 - [Project structure](#project-structure)
 - [The agent pipeline](#the-agent-pipeline)
 - [A realistic user journey](#a-realistic-user-journey)
@@ -26,73 +28,180 @@ conflicted_orders.csv   →  CONFLICT           (type mismatch, blocked)
 - [Configuration](#configuration)
 - [AI tools & safety](#ai-tools--safety)
 - [Demo data](#demo-data)
-- [Local testing](#local-testing)
 
 ---
 
-## Quick start
+## Running with Docker (Recommended)
+
+This is the fastest way to get started. It containerizes the FastAPI backend, PostgreSQL databases, and Neo4j graph database.
 
 ### Prerequisites
+- **Docker + Docker Compose** (Docker 20+)
+- **Node.js** (20+)
+- **Groq API Key** — get one free at [console.groq.com](https://console.groq.com)
 
-- Docker + Docker Compose
-- Node.js 20+
-- A Groq API key — grab one at [console.groq.com](https://console.groq.com)
-
-### 1. Clone and configure
-
+### 1. Configure Environment
+Copy the example environment configuration in the project root:
 ```bash
-git clone https://github.com/adityaatre26/Conduit.git
-cd Conduit
-cp backend/.env.example backend/.env 2>/dev/null || true   # if you have one
+cp .env.example .env
+```
+Open the newly created `.env` file and set your `GROQ_API_KEY` (and any other desired variables).
+
+### 2. Start the Backend Infrastructure
+Run the following command in the project root directory:
+```bash
+docker compose up -d --build
+```
+This spins up four services:
+- `api` (FastAPI backend server on port `8000`)
+- `warehouse-db` (PostgreSQL target warehouse database on port `5432`)
+- `source-db` (PostgreSQL source database on port `5433`)
+- `neo4j` (Neo4j Graph Database on ports `7474`/`7687`)
+
+Verify the backend is healthy:
+```bash
+curl http://localhost:8000/api/health
+# → {"status":"ok","mock_ai":false,"environment":"development","neo4j":"connected"}
 ```
 
-Create `/home/<you>/dev/Conduit/.env` (the root one — Docker reads this):
+### 3. Load Database Seed Data (One-time)
+Populate the PostgreSQL skills registry and lineage tables:
 
+Run this command in the project root (works on Windows CMD/PowerShell, Linux, and macOS):
 ```bash
-GROQ_API_KEY=gsk_your_key_here
-MOCK_AI=False            # set to True to skip LLM calls during development
-POSTGRES_PASSWORD=password
+docker compose exec -T warehouse-db psql -U user -d warehousedb < db/seed_extensions.sql
 ```
+> [!NOTE]
+> SQL errors regarding `conduit_graph.graph_nodes` are expected and completely safe to ignore. The relationship graph has been migrated to Neo4j.
 
-> **Important:** Never commit `.env` files. The repo's `.gitignore` blocks them. If you accidentally push one, GitHub's push protection will block it and you'll need to scrub history.
-
-### 2. Start the backend
-
-```bash
-cd /path/to/Conduit
-docker compose up -d
-```
-
-This brings up three containers: `conduit-source-db-1`, `conduit-warehouse-db-1`, `conduit-api-1`. The warehouse DB is auto-seeded from `db/seed_warehouse.sql`. The API is on `http://localhost:8000`.
-
-Verify:
-
-```bash
-curl http://localhost:8000/api/sources
-# → [{"id":1,"name":"Production_Warehouse_PG","unit_type":"POSTGRES","status":"CONNECTED"}]
-```
-
-### 3. Load the extension seeds (one-time per fresh DB)
-
-The skill registry, knowledge graph, and lineage tables are populated by `db/seed_extensions.sql`. Run it once after the warehouse is up:
-
-```bash
-docker exec -i conduit-warehouse-db-1 psql -U user -d warehousedb < db/seed_extensions.sql
-```
-
-### 4. Start the frontend
-
+### 4. Start the Frontend UI
+Launch the Next.js frontend:
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
+Open **http://localhost:3000** in your browser. Next.js automatically proxies `/api/*` requests to port `8000`.
 
-The UI is on `http://localhost:3000`. The Next.js dev server proxies `/api/*` to `:8000` via `next.config.js`, so no CORS or env config is needed.
+---
 
-### 5. Try it
+## Running without Docker (Natively)
 
-Open `http://localhost:3000`, click **Ingest** in the sidebar, drop `db/demo_csvs/drifted_orders.csv` on the upload zone, and click **Generate proposal**. Watch the 6-step state machine animate, then open the detail view to see the drift, generated code, and context bundle.
+You can run the entire system natively on your local machine if you prefer not to use containerization.
+
+### Prerequisites
+- **Python** (3.11+)
+- **PostgreSQL** (15+) running locally
+- **Node.js** (20+)
+- **Groq API Key**
+- **Neo4j DB** (You can use a local Neo4j installation, or configure a free remote [Neo4j Aura](https://neo4j.com/cloud/platform/aura-graph-database/) instance)
+
+### 1. Set Up Local PostgreSQL Databases
+Log in to your local PostgreSQL instance and run the following queries to create the databases and owner user:
+```sql
+CREATE USER conduit_user WITH PASSWORD 'password';
+CREATE DATABASE warehousedb OWNER conduit_user;
+CREATE DATABASE sourcedb OWNER conduit_user;
+```
+
+Now, import the database schemas and seeds:
+```bash
+# Seed target table schema
+psql -U conduit_user -d warehousedb < db/seed_warehouse.sql
+
+# Seed system skills and audit extensions data
+psql -U conduit_user -d warehousedb < db/seed_extensions.sql
+```
+
+### 2. Configure Environment
+Copy the example environment configuration in the `backend/` directory:
+```bash
+cp backend/.env.example backend/.env
+```
+Open `backend/.env` and update the database URLs and Neo4j credentials to match your local setup, and configure your `GROQ_API_KEY`.
+
+### 3. Run the Backend API Natively
+Open a terminal in the `backend/` directory, set up your virtual environment, install the dependencies, and start `uvicorn`:
+
+```bash
+cd backend
+python -m venv .venv
+
+# Activate virtualenv:
+# On Windows (CMD/PowerShell):
+.venv\Scripts\activate
+# On Linux / macOS:
+source .venv/bin/activate
+
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+Check health:
+```bash
+curl http://localhost:8000/api/health
+```
+
+### 4. Run the Frontend UI Natively
+In another terminal, navigate to the `frontend/` directory and spin up Next.js:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open **http://localhost:3000** in your browser.
+
+---
+
+## Local testing & Verification
+
+### Running Ingest via Command Line
+
+You can trigger a test schema ingest using `curl` from your terminal to verify that the pipeline is working properly:
+
+```bash
+# Upload a clean order CSV and target it to orders_clean
+curl -X POST http://localhost:8000/api/ingest \
+  -F "file=@db/demo_csvs/clean_orders.csv" \
+  -F "target_table=orders_clean" | python3 -m json.tool
+```
+
+The response will return a JSON payload containing a `proposal_id`. Copy that ID and run:
+
+```bash
+# 1. Fetch the generated proposal details
+curl http://localhost:8000/api/proposals/<proposal_id>
+
+# 2. Approve and execute the proposal
+curl -X POST http://localhost:8000/api/proposals/<proposal_id>/approve \
+  -H "Content-Type: application/json" \
+  -d '{"human_approver_id": "demo_engineer_01"}'
+```
+
+Verify rows successfully landed in the database:
+- **With Docker**:
+  ```bash
+  docker compose exec warehouse-db psql -U user -d warehousedb -c "SELECT COUNT(*) FROM public.orders_clean;"
+  ```
+- **Without Docker**:
+  ```bash
+  psql -U conduit_user -d warehousedb -c "SELECT COUNT(*) FROM public.orders_clean;"
+  ```
+
+### Running the Automated Test Suite
+
+A comprehensive test suite is provided to verify all 12 system scenarios (A–L).
+
+- **With Docker**:
+  Ensure the containers are running, then run the checks inside the `api` container:
+  ```bash
+  docker compose exec api python run_checks.py
+  ```
+
+- **Without Docker**:
+  Ensure the backend API is running locally, activate your virtual environment, install the dependencies, and run:
+  ```bash
+  python run_checks.py
+  ```
 
 ---
 
@@ -391,85 +500,3 @@ Three CSVs in `db/demo_csvs/`:
 | `conflicted_orders.csv` | Type mismatches, missing required | `CONFLICT` |
 
 The target is `public.orders_clean` (the only registered table in `conduit.tables_metadata`).
-
----
-
-## Local testing
-
-### End-to-end smoke test
-
-```bash
-# Backend
-cd Conduit
-docker compose up -d
-docker exec -i conduit-warehouse-db-1 psql -U user -d warehousedb < db/seed_extensions.sql
-
-# Frontend
-cd frontend
-npm install
-npm run dev
-```
-
-Then in another terminal:
-
-```bash
-# Sanity: backend is up
-curl http://localhost:8000/api/sources
-# → [{"id":1,"name":"Production_Warehouse_PG","unit_type":"POSTGRES","status":"CONNECTED"}]
-
-# Run an ingest
-curl -X POST http://localhost:8000/api/ingest \
-  -F "file=@../db/demo_csvs/clean_orders.csv" \
-  -F "target_table=orders_clean" | python3 -m json.tool
-```
-
-The response will include a `proposal_id`. You can then:
-
-```bash
-# Get the proposal back
-curl http://localhost:8000/api/proposals/<id>
-
-# Get the context bundle
-curl http://localhost:8000/api/proposals/<id>/context
-
-# Approve it
-curl -X POST http://localhost:8000/api/proposals/<id>/approve \
-  -H "Content-Type: application/json" \
-  -d '{"human_approver_id": "demo_engineer_01"}'
-
-# Verify rows landed
-docker exec conduit-warehouse-db-1 psql -U user -d warehousedb \
-  -c "SELECT COUNT(*) FROM public.orders_clean;"
-```
-
-### Browser walkthrough
-
-1. Open `http://localhost:3000`
-2. **Overview** — see health metrics populate as data flows in
-3. **Ingest** → drop `drifted_orders.csv` → watch the state machine → review the proposal
-4. Click **Open detail view** → switch between Drift / Generated code / AI prompt / AI context bundle tabs
-5. Click **Approve & execute** → watch the right sidebar switch to "Execution"
-6. Visit **Audit** for the immutable record
-7. Visit **Quarantine** if any rows failed
-8. Visit **Skills** → click `pii_masking` → see its scripts and examples
-9. Visit **Graph** → type `orders_clean` in the Lineage explorer → Run → see the BFS reach
-10. Visit **Graph** → type `orders_clean` in the Impact analyzer → Run → see what depends on it
-11. Visit **Lineage** → filter by operation type, search by proposal_id
-
----
-
-## Tech stack
-
-**Backend:** Python 3.11, FastAPI, SQLAlchemy 2.0 async, asyncpg, Pydantic v2, Groq SDK, pandas, ast (stdlib)
-
-**Frontend:** Next.js 14, React 18, TypeScript 5.5, Tailwind CSS 3.4, Inter font
-
-**Infrastructure:** Docker Compose, PostgreSQL 15
-
-**LLM:** Groq `llama-3.3-70b-versatile`
-
----
-
-## License
-
-Internal project — see project owner.
